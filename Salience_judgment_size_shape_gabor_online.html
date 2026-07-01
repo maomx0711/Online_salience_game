@@ -57,6 +57,11 @@ const PARAMS = {
 
 const BG_LUM = 128; // 背景灰度值
 
+// 注视十字尺寸(等待期与刺激期使用完全相同的固定像素尺寸)
+const FIX_ARM = 12;       // 十字每条臂长的一半(像素)
+const FIX_THICK = 3;      // 十字线宽(像素)
+const FIX_COLOR = '#000'; // 灰底版用黑色
+
 // 3 个特征维度(区块顺序会被随机打乱)
 const FEATURES = ['size', 'shape', 'gabor'];
 
@@ -127,19 +132,23 @@ const jsPsychSalienceMap = (function (jspsych) {
                 const w = canvas.width, h = canvas.height;
                 const cx = w / 2, cy = h / 2;                 // 屏幕中心(注视点位置)
                 const scale = Math.min(w, h) / 900;           // 依据窗口缩放
-                const CELL = 46 * scale;                      // 每个元素占据的格子边长(元素更大、间距更大)
-                const ncols = Math.ceil(w / CELL) + 2;        // 网格列数(多铺以覆盖整个屏幕)
-                const nrows = Math.ceil(h / CELL) + 2;        // 网格行数(覆盖上、下半部分)
+                const CELL = 46 * scale;                      // 格子边长(元素更大、间距更大)
+                const ncols = Math.ceil(w / CELL) + 2;        // 列数：覆盖整屏宽度
                 const cCenter = (ncols - 1) / 2;
-                const rCenter = (nrows - 1) / 2;
-                const eccCols = Math.round(Math.min(w * 0.20, 320 * scale) / CELL); // 水平离心度(格)
-                const cC = Math.round(cCenter), rC = Math.round(rCenter);
-                const leftCols  = [cC - eccCols, cC - eccCols + 1];   // 左目标占 2 列
-                const rightCols = [cC + eccCols - 1, cC + eccCols];   // 右目标占 2 列
-                const tRows     = [rC - 1, rC];                       // 目标占 2 行(屏幕垂直中央的左右两侧)
+                const nrows = Math.ceil((h - cy) / CELL) + 2; // 行数：只覆盖下半屏(屏幕中央到底部)
+                // 两个目标分别位于左下、右下象限的中心
+                const leftTx = w * 0.25, rightTx = w * 0.75, ty = cy + (h - cy) / 2;
+                const leftColF  = cCenter + (leftTx  - cx) / CELL;
+                const rightColF = cCenter + (rightTx - cx) / CELL;
+                const rowF = (ty - cy) / CELL - 0.5;
+                function tcells(colF, rF) { // 以某个中心点确定 2x2 目标所占的列/行
+                    const c0 = Math.round(colF - 0.5), r0 = Math.round(rF - 0.5);
+                    return { cols: [c0, c0 + 1], rows: [r0, r0 + 1] };
+                }
+                const Lt = tcells(leftColF, rowF), Rt = tcells(rightColF, rowF);
                 const gapR = CELL * 1.2;                              // 注视点留空半径
-                return { w, h, cx, cy, scale, CELL, ncols, nrows, cCenter, rCenter,
-                         leftCols, rightCols, tRows, gapR };
+                return { w, h, cx, cy, scale, CELL, ncols, nrows, cCenter,
+                         leftCols: Lt.cols, rightCols: Rt.cols, tRows: Lt.rows, gapR };
             }
 
             // 判断格子(c,r)属于哪个目标：'left' / 'right' / null(外周)
@@ -153,7 +162,8 @@ const jsPsychSalienceMap = (function (jspsych) {
 
             // 格子中心的像素坐标
             function cellXY(c, r, g) {
-                return { x: g.cx + (c - g.cCenter) * g.CELL, y: g.cy + (r - g.rCenter) * g.CELL };
+                // 只填充下半屏：r=0 对应屏幕中央下方的第一行，上半屏保持空白
+                return { x: g.cx + (c - g.cCenter) * g.CELL, y: g.cy + (r + 0.5) * g.CELL };
             }
 
             // ---- Gabor 维度：预渲染 3 种对比度的 Gabor 贴图(外周/左目标/右目标) ----
@@ -227,9 +237,10 @@ const jsPsychSalienceMap = (function (jspsych) {
 
             // ---- 绘制注视十字(灰底上用黑色, 始终位于屏幕正中央) ----
             function drawFixation(g) {
-                ctx.strokeStyle = '#000';
-                ctx.lineWidth = Math.max(2, 3 * g.scale);
-                const s = 10 * g.scale;
+                // 使用固定像素尺寸，保证与等待期(HTML)注视十字完全一致
+                ctx.strokeStyle = FIX_COLOR;
+                ctx.lineWidth = FIX_THICK;
+                const s = FIX_ARM;
                 ctx.beginPath();
                 ctx.moveTo(g.cx - s, g.cy); ctx.lineTo(g.cx + s, g.cy);
                 ctx.moveTo(g.cx, g.cy - s); ctx.lineTo(g.cx, g.cy + s);
@@ -374,7 +385,12 @@ function generateConditions(feature, reps) {
 }
 
 // 注视点(HTML 版, 灰底黑十字)
-const FIX_HTML = '<div style="font-size:36px;color:#000;">+</div>';
+// 等待期注视十字(用两个 div 拼成，尺寸与画布上的注视十字完全相同)
+const FIX_HTML =
+    '<div style="position:relative;width:0;height:0;margin:auto;">' +
+    '<div style="position:absolute;left:' + (-FIX_ARM) + 'px;top:' + (-FIX_THICK / 2) + 'px;width:' + (2 * FIX_ARM) + 'px;height:' + FIX_THICK + 'px;background:' + FIX_COLOR + ';"></div>' +
+    '<div style="position:absolute;left:' + (-FIX_THICK / 2) + 'px;top:' + (-FIX_ARM) + 'px;width:' + FIX_THICK + 'px;height:' + (2 * FIX_ARM) + 'px;background:' + FIX_COLOR + ';"></div>' +
+    '</div>';
 
 // 由一个条件构造一个完整的试次序列：
 //   注视点(500) → 刺激(100) → 反应窗口(2000) → [练习反馈] → ITI(700)

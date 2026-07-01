@@ -59,6 +59,11 @@ const PARAMS = {
     KEY_RIGHT: 'arrowright'   // 右侧更显著 → 右方向键
 };
 
+// 注视十字尺寸(等待期与刺激期使用完全相同的固定像素尺寸)
+const FIX_ARM = 12;       // 十字每条臂长的一半(像素)
+const FIX_THICK = 3;      // 十字线宽(像素)
+const FIX_COLOR = '#fff'; // 黑底版用白色
+
 // 4 个特征维度(区块顺序会被随机打乱)
 const FEATURES = ['orientation', 'color', 'contrast', 'motion'];
 
@@ -74,7 +79,7 @@ const FEATURE_LABELS = {
 // 索引越大 → 差异越大 → 越显著
 const LEVEL_DIFFS = {
     orientation: [15, 30, 45, 60, 75, 90],      // 朝向角度差 (度)
-    color:       [30, 60, 90, 120, 150, 180],   // 色相差 (度)
+    color:       [21, 43, 64, 85, 107, 128],    // 单通道强度差 (0-255)
     contrast:    [24, 48, 72, 96, 120, 127],    // 亮度差 (灰阶 0-255)
     motion:      [0.6, 1.2, 1.8, 2.4, 3.0, 3.6] // 速度差 (px/帧, 以 60fps 为基准)
 };
@@ -127,23 +132,24 @@ const jsPsychSalienceMap = (function (jspsych) {
             function geom() {
                 const w = canvas.width, h = canvas.height;
                 const cx = w / 2, cy = h / 2;                 // 屏幕中心(注视点位置)
-                const scale = Math.min(w, h) / 900;           // 依据窗口大小缩放，保证不同屏幕观感一致
-                const CELL = 46 * scale;                      // 每个元素占据的格子边长(元素更大、间距更大)
-                // 网格行列数：向外多铺 2 圈，确保完全覆盖整个屏幕(含上半部分)
-                const ncols = Math.ceil(w / CELL) + 2;
-                const nrows = Math.ceil(h / CELL) + 2;
+                const scale = Math.min(w, h) / 900;           // 依据窗口大小缩放
+                const CELL = 46 * scale;                      // 格子边长(元素更大、间距更大)
+                const ncols = Math.ceil(w / CELL) + 2;        // 列数：覆盖整屏宽度
                 const cCenter = (ncols - 1) / 2;              // 中心列(浮点)
-                const rCenter = (nrows - 1) / 2;              // 中心行(浮点)
-                // 目标区域相对中心的水平离心度(单位：格子)；垂直方向放在屏幕正中央的左右两侧
-                const eccCols = Math.round(Math.min(w * 0.20, 320 * scale) / CELL);
-                const cC = Math.round(cCenter), rC = Math.round(rCenter);
-                // 左、右目标各占 2 列、2 行，位于屏幕垂直中央的左右两侧
-                const leftCols  = [cC - eccCols, cC - eccCols + 1];
-                const rightCols = [cC + eccCols - 1, cC + eccCols];
-                const tRows     = [rC - 1, rC];
-                const gapR = CELL * 1.2; // 注视点周围留空的半径(避免元素遮挡注视点)
-                return { w, h, cx, cy, scale, CELL, ncols, nrows, cCenter, rCenter,
-                         leftCols, rightCols, tRows, gapR };
+                const nrows = Math.ceil((h - cy) / CELL) + 2; // 行数：只覆盖下半屏(屏幕中央到底部)
+                // 两个目标分别位于左下、右下象限的中心
+                const leftTx = w * 0.25, rightTx = w * 0.75, ty = cy + (h - cy) / 2;
+                const leftColF  = cCenter + (leftTx  - cx) / CELL;
+                const rightColF = cCenter + (rightTx - cx) / CELL;
+                const rowF = (ty - cy) / CELL - 0.5;
+                function tcells(colF, rF) { // 以某个中心点确定 2x2 目标所占的列/行
+                    const c0 = Math.round(colF - 0.5), r0 = Math.round(rF - 0.5);
+                    return { cols: [c0, c0 + 1], rows: [r0, r0 + 1] };
+                }
+                const Lt = tcells(leftColF, rowF), Rt = tcells(rightColF, rowF);
+                const gapR = CELL * 1.2; // 注视点周围留空的半径
+                return { w, h, cx, cy, scale, CELL, ncols, nrows, cCenter,
+                         leftCols: Lt.cols, rightCols: Rt.cols, tRows: Lt.rows, gapR };
             }
 
             // 判断格子(c,r)属于哪个目标：'left' / 'right' / null(外周)
@@ -157,7 +163,8 @@ const jsPsychSalienceMap = (function (jspsych) {
 
             // 格子中心的像素坐标
             function cellXY(c, r, g) {
-                return { x: g.cx + (c - g.cCenter) * g.CELL, y: g.cy + (r - g.rCenter) * g.CELL };
+                // 只填充下半屏：r=0 对应屏幕中央下方的第一行，上半屏保持空白
+                return { x: g.cx + (c - g.cCenter) * g.CELL, y: g.cy + (r + 0.5) * g.CELL };
             }
 
             // ---- 运动特征：为每个格子生成一个小点的运动状态 ----
@@ -187,9 +194,10 @@ const jsPsychSalienceMap = (function (jspsych) {
 
             // ---- 绘制注视十字(始终位于屏幕正中央) ----
             function drawFixation(g) {
-                ctx.strokeStyle = '#fff';
-                ctx.lineWidth = Math.max(2, 3 * g.scale);
-                const s = 10 * g.scale;
+                // 使用固定像素尺寸，保证与等待期(HTML)注视十字完全一致
+                ctx.strokeStyle = FIX_COLOR;
+                ctx.lineWidth = FIX_THICK;
+                const s = FIX_ARM;
                 ctx.beginPath();
                 ctx.moveTo(g.cx - s, g.cy); ctx.lineTo(g.cx + s, g.cy);
                 ctx.moveTo(g.cx, g.cy - s); ctx.lineTo(g.cx, g.cy + s);
@@ -225,11 +233,14 @@ const jsPsychSalienceMap = (function (jspsych) {
                             ctx.restore();
 
                         } else if (trial.feature === 'color') {
-                            // 颜色：绘制一个圆点，色相因外周/目标而不同
-                            let hue = S.baseHue;
-                            if (side === 'left') hue = S.leftHue;
-                            else if (side === 'right') hue = S.rightHue;
-                            ctx.fillStyle = 'hsl(' + hue + ', 90%, 55%)';
+                            // 颜色：外周与目标在“同一颜色通道”内变化(其余通道为0)，
+                            // 目标与外周在该通道上的强度差 = 显著性
+                            let v = S.baseVal;
+                            if (side === 'left') v = S.leftVal;
+                            else if (side === 'right') v = S.rightVal;
+                            const rgb = [0, 0, 0];
+                            rgb[S.colorCh] = Math.round(v);
+                            ctx.fillStyle = 'rgb(' + rgb[0] + ',' + rgb[1] + ',' + rgb[2] + ')';
                             ctx.beginPath();
                             ctx.arc(p.x, p.y, g.CELL * 0.30, 0, 2 * Math.PI);
                             ctx.fill();
@@ -319,10 +330,14 @@ function makeTrialStim(feature, leftLevel, rightLevel) {
         stim.rightAngle = base + rightDiff;
 
     } else if (feature === 'color') {
-        const base = randInt(360);                  // 外周色相随机
-        stim.baseHue = base;
-        stim.leftHue = (base + leftDiff) % 360;     // 目标色相 = 外周 + 差异
-        stim.rightHue = (base + rightDiff) % 360;
+        // 每个 trial 随机选一个颜色通道(0=R,1=G,2=B)；外周与目标都只在该通道内变化。
+        // 例如通道R、外周[127,0,0]、左目标[192,0,0]、右目标[152,0,0]。
+        const ch = randInt(3);
+        const base = 127;                           // 外周在该通道的基础强度
+        stim.colorCh = ch;
+        stim.baseVal = base;
+        stim.leftVal = Math.min(255, base + leftDiff);   // 目标 = 外周 + 差异(同一通道内变亮)
+        stim.rightVal = Math.min(255, base + rightDiff);
 
     } else if (feature === 'contrast') {
         const baseLum = 128;                        // 外周固定为中灰
@@ -368,7 +383,12 @@ function generateConditions(feature, reps) {
 }
 
 // 注视点(HTML 版, 用于刺激前/反应窗口/ITI)
-const FIX_HTML = '<div style="font-size:36px;color:#fff;">+</div>';
+// 等待期注视十字(用两个 div 拼成，尺寸与画布上的注视十字完全相同)
+const FIX_HTML =
+    '<div style="position:relative;width:0;height:0;margin:auto;">' +
+    '<div style="position:absolute;left:' + (-FIX_ARM) + 'px;top:' + (-FIX_THICK / 2) + 'px;width:' + (2 * FIX_ARM) + 'px;height:' + FIX_THICK + 'px;background:' + FIX_COLOR + ';"></div>' +
+    '<div style="position:absolute;left:' + (-FIX_THICK / 2) + 'px;top:' + (-FIX_ARM) + 'px;width:' + FIX_THICK + 'px;height:' + (2 * FIX_ARM) + 'px;background:' + FIX_COLOR + ';"></div>' +
+    '</div>';
 
 // 由一个条件构造一个完整的试次序列：
 //   注视点(500) → 刺激(100) → 反应窗口(2000) → [练习反馈] → ITI(700)
