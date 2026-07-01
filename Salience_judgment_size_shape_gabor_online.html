@@ -1,0 +1,685 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>显著性判断任务 - 圆环大小/形状/Gabor对比度</title>
+    <!-- 引入 jsPsych 主库及所需插件 -->
+    <script src="https://unpkg.com/jspsych@7.3.4"></script>
+    <script src="https://unpkg.com/@jspsych/plugin-html-keyboard-response@1.1.3"></script>
+    <script src="https://unpkg.com/@jspsych/plugin-survey-text@1.1.3"></script>
+    <link href="https://unpkg.com/jspsych@7.3.4/css/jspsych.css" rel="stylesheet" type="text/css" />
+    <style>
+        /* 背景为灰色(与 Gabor 的平均亮度一致, rgb 128)，铺满整个窗口 */
+        html, body {
+            background-color: rgb(128,128,128);
+            margin: 0;
+            padding: 0;
+            height: 100%;
+        }
+        body { cursor: default; }
+        /* 实验进行时隐藏鼠标指针 */
+        body.hide-cursor { cursor: none; }
+        .jspsych-display-element { color: #000; }
+        .jspsych-content { max-width: 1100px; }
+    </style>
+</head>
+<body></body>
+<script>
+/* =====================================================================
+ *  显著性判断任务 (Salience Judgment, 左右 2AFC) —— 灰色背景版
+ *
+ *  与黑色背景版流程完全相同(刺激闪现 100ms + 2s 反应窗口，被试全程注视中央)，
+ *  仅把制造显著性的特征维度换成 3 种：
+ *    1. 圆环大小 (size)  —— 元素是圆环，目标圆环与外周圆环大小不同；
+ *    2. 形状     (shape) —— 元素是实心形状，目标形状与外周(圆形)不同；
+ *                           形状集合：圆形、六边形、正方形、菱形、三角形；
+ *    3. Gabor对比度(gabor)—— 元素是 Gabor 光栅，目标 Gabor 与外周对比度不同。
+ *
+ *  刺激构成：外周(surround)元素铺满整个屏幕，形成均匀纹理；在中央下方左、右
+ *  两侧各嵌入一小块 2x2 目标(target)区域，其属性与外周不同。
+ *  目标与外周的差异 = 该侧的显著性(越不同越显著)，差异固定为若干水平。
+ *
+ *  时间流程(每个试次)：
+ *    注视点(500ms) → 刺激呈现(100ms) → 反应窗口(2000ms, 仅注视点) → ITI(700ms)
+ *  被试全程注视屏幕中央的注视点。左侧更显著按 ←，右侧更显著按 →。
+ * =====================================================================*/
+
+/* ---------------------- 实验参数 ---------------------- */
+const PARAMS = {
+    FIX_DURATION: 500,        // 刺激前注视点呈现时长 (ms)
+    STIM_DURATION: 100,       // 刺激呈现时长 (ms)
+    RESPONSE_DEADLINE: 2000,  // 反应窗口时长 (ms)，刺激消失后开始计时
+    ITI_DURATION: 700,        // 试次间隔 (ms)
+    REPS_PER_BLOCK: 1,        // 每个维度中，每个(左,右)水平组合的重复次数
+    KEY_LEFT: 'arrowleft',    // 左侧更显著 → 左方向键
+    KEY_RIGHT: 'arrowright'   // 右侧更显著 → 右方向键
+};
+
+const BG_LUM = 128; // 背景灰度值
+
+// 注视十字尺寸(等待期与刺激期使用完全相同的固定像素尺寸)
+const FIX_ARM = 12;       // 十字每条臂长的一半(像素)
+const FIX_THICK = 3;      // 十字线宽(像素)
+const FIX_COLOR = '#000'; // 灰底版用黑色
+
+// 3 个特征维度(区块顺序会被随机打乱)
+const FEATURES = ['size', 'shape', 'gabor'];
+
+// 特征维度对应的中文名(用于指导语显示)
+const FEATURE_LABELS = {
+    size:  '圆环大小',
+    shape: '形状',
+    gabor: 'Gabor对比度'
+};
+
+// 形状集合：按“与圆形外周的差异(角状程度)”从低到高排列，用于形状维度的显著性水平。
+// level 1=圆形(与外周相同,几乎不显著) … level 5=三角形(最尖锐,最显著)
+const SHAPES = ['circle', 'hexagon', 'square', 'diamond', 'triangle'];
+
+// 各维度的显著性水平(目标与外周的差异)，从低到高对应 level 1..N；索引越大越显著。
+const LEVEL_DIFFS = {
+    size:  [0.03, 0.06, 0.09, 0.12, 0.15, 0.18], // 圆环半径差(占格子边长的比例)，6 个水平
+    gabor: [0.08, 0.16, 0.24, 0.32, 0.40, 0.48]  // Gabor 对比度差(0~1)，6 个水平
+    // shape 维度的水平由 SHAPES 决定(共 5 个水平)
+};
+
+// 返回某个维度的水平数
+function numLevels(feature) {
+    if (feature === 'shape') return SHAPES.length; // 5
+    return LEVEL_DIFFS[feature].length;            // 6
+}
+
+/* =====================================================================
+ *  自定义 jsPsych 插件: salience-map
+ *  功能：把外周纹理铺满整个屏幕，并在左右两侧嵌入目标区域，静态呈现
+ *        STIM_DURATION 毫秒后自动结束(本阶段不收集按键)。
+ * =====================================================================*/
+const jsPsychSalienceMap = (function (jspsych) {
+    "use strict";
+
+    // 插件参数声明
+    const info = {
+        name: 'salience-map',
+        parameters: {
+            feature:  { type: jspsych.ParameterType.STRING, default: 'size' }, // 当前特征维度
+            stim:     { type: jspsych.ParameterType.OBJECT, default: {} },     // 刺激参数
+            trial_duration: { type: jspsych.ParameterType.INT, default: PARAMS.STIM_DURATION },
+            data:     { type: jspsych.ParameterType.OBJECT, default: {} }
+        }
+    };
+
+    class SalienceMapPlugin {
+        constructor(jsPsych) { this.jsPsych = jsPsych; }
+
+        trial(display_element, trial) {
+            const self = this;
+            const S = trial.stim; // 刺激参数
+
+            // ---- 建立铺满整个窗口的画布 ----
+            display_element.innerHTML =
+                '<canvas id="salience-canvas" style="position:fixed;top:0;left:0;"></canvas>';
+            const canvas = document.getElementById('salience-canvas');
+            const ctx = canvas.getContext('2d');
+
+            function sizeCanvas() {
+                canvas.width = window.innerWidth;
+                canvas.height = window.innerHeight;
+            }
+            sizeCanvas();
+
+            // ---- 计算全屏网格布局(元素较小，形成细密纹理) ----
+            function geom() {
+                const w = canvas.width, h = canvas.height;
+                const cx = w / 2, cy = h / 2;                 // 屏幕中心(注视点位置)
+                const scale = Math.min(w, h) / 900;           // 依据窗口缩放
+                const CELL = 46 * scale;                      // 格子边长(元素更大、间距更大)
+                const ncols = Math.ceil(w / CELL) + 2;        // 列数：覆盖整屏宽度
+                const cCenter = (ncols - 1) / 2;
+                const nrows = Math.ceil((h - cy) / CELL) + 2; // 行数：只覆盖下半屏(屏幕中央到底部)
+                // 两个目标分别位于左下、右下象限的中心
+                const leftTx = w * 0.25, rightTx = w * 0.75, ty = cy + (h - cy) / 2;
+                const leftColF  = cCenter + (leftTx  - cx) / CELL;
+                const rightColF = cCenter + (rightTx - cx) / CELL;
+                const rowF = (ty - cy) / CELL - 0.5;
+                function tcells(colF, rF) { // 以某个中心点确定 2x2 目标所占的列/行
+                    const c0 = Math.round(colF - 0.5), r0 = Math.round(rF - 0.5);
+                    return { cols: [c0, c0 + 1], rows: [r0, r0 + 1] };
+                }
+                const Lt = tcells(leftColF, rowF), Rt = tcells(rightColF, rowF);
+                const gapR = CELL * 1.2;                              // 注视点留空半径
+                return { w, h, cx, cy, scale, CELL, ncols, nrows, cCenter,
+                         leftCols: Lt.cols, rightCols: Rt.cols, tRows: Lt.rows, gapR };
+            }
+
+            // 判断格子(c,r)属于哪个目标：'left' / 'right' / null(外周)
+            function targetOf(c, r, g) {
+                if (g.tRows.indexOf(r) !== -1) {
+                    if (g.leftCols.indexOf(c) !== -1) return 'left';
+                    if (g.rightCols.indexOf(c) !== -1) return 'right';
+                }
+                return null;
+            }
+
+            // 格子中心的像素坐标
+            function cellXY(c, r, g) {
+                // 只填充下半屏：r=0 对应屏幕中央下方的第一行，上半屏保持空白
+                return { x: g.cx + (c - g.cCenter) * g.CELL, y: g.cy + (r + 0.5) * g.CELL };
+            }
+
+            // ---- Gabor 维度：预渲染 3 种对比度的 Gabor 贴图(外周/左目标/右目标) ----
+            let gaborPatches = null;
+            function makeGabor(size, contrast, ori, lambda, sigma) {
+                const c = document.createElement('canvas');
+                c.width = size; c.height = size;
+                const gx = c.getContext('2d');
+                const img = gx.createImageData(size, size);
+                const d = img.data;
+                const cc = (size - 1) / 2;
+                const co = Math.cos(ori), si = Math.sin(ori);
+                for (let y = 0; y < size; y++) {
+                    for (let x = 0; x < size; x++) {
+                        const dx = x - cc, dy = y - cc;
+                        const xr = dx * co + dy * si;                          // 旋转后的坐标
+                        const gauss = Math.exp(-(dx * dx + dy * dy) / (2 * sigma * sigma)); // 高斯窗
+                        const wave = Math.sin(2 * Math.PI * xr / lambda);      // 正弦光栅
+                        let lum = BG_LUM + 127 * contrast * wave * gauss;      // 亮度围绕背景灰调制
+                        lum = Math.max(0, Math.min(255, lum));
+                        const idx = (y * size + x) * 4;
+                        d[idx] = d[idx + 1] = d[idx + 2] = lum;
+                        d[idx + 3] = 255;
+                    }
+                }
+                gx.putImageData(img, 0, 0);
+                return c;
+            }
+            function buildGabor() {
+                const g = geom();
+                const size = Math.max(8, Math.round(g.CELL));
+                const ori = (S.gaborDir || 0) * Math.PI / 180; // 全屏统一的光栅朝向
+                const lambda = size * 0.5, sigma = size * 0.32;
+                gaborPatches = {
+                    base:  makeGabor(size, S.baseContrast, ori, lambda, sigma),
+                    left:  makeGabor(size, S.leftContrast, ori, lambda, sigma),
+                    right: makeGabor(size, S.rightContrast, ori, lambda, sigma),
+                    size: size
+                };
+            }
+            if (trial.feature === 'gabor') buildGabor();
+
+            // ---- 绘制一个形状(实心, 黑色) ----
+            function drawShape(x, y, r, shape) {
+                ctx.fillStyle = '#000';
+                if (shape === 'circle') {
+                    ctx.beginPath();
+                    ctx.arc(x, y, r, 0, 2 * Math.PI);
+                    ctx.fill();
+                } else if (shape === 'square') {
+                    const s = r * 1.7; // 正方形(轴对齐)
+                    ctx.fillRect(x - s / 2, y - s / 2, s, s);
+                } else {
+                    // 其余用正多边形/菱形绘制
+                    let n, rot;
+                    if (shape === 'triangle') { n = 3; rot = -Math.PI / 2; }       // 三角形，顶点朝上
+                    else if (shape === 'diamond') { n = 4; rot = -Math.PI / 2; }    // 菱形(顶点朝上的四边形)
+                    else if (shape === 'hexagon') { n = 6; rot = -Math.PI / 2; }    // 六边形
+                    else { n = 4; rot = -Math.PI / 2; }
+                    ctx.beginPath();
+                    for (let i = 0; i < n; i++) {
+                        const a = rot + i * 2 * Math.PI / n;
+                        const px = x + r * Math.cos(a);
+                        const py = y + r * Math.sin(a);
+                        if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+                    }
+                    ctx.closePath();
+                    ctx.fill();
+                }
+            }
+
+            // ---- 绘制注视十字(灰底上用黑色, 始终位于屏幕正中央) ----
+            function drawFixation(g) {
+                // 使用固定像素尺寸，保证与等待期(HTML)注视十字完全一致
+                ctx.strokeStyle = FIX_COLOR;
+                ctx.lineWidth = FIX_THICK;
+                const s = FIX_ARM;
+                ctx.beginPath();
+                ctx.moveTo(g.cx - s, g.cy); ctx.lineTo(g.cx + s, g.cy);
+                ctx.moveTo(g.cx, g.cy - s); ctx.lineTo(g.cx, g.cy + s);
+                ctx.stroke();
+            }
+
+            // ---- 单帧绘制：铺灰底 → 铺满全屏元素 → 画注视点 ----
+            function draw() {
+                const g = geom();
+                ctx.fillStyle = 'rgb(' + BG_LUM + ',' + BG_LUM + ',' + BG_LUM + ')';
+                ctx.fillRect(0, 0, g.w, g.h);
+
+                for (let c = 0; c < g.ncols; c++) {
+                    for (let r = 0; r < g.nrows; r++) {
+                        const p = cellXY(c, r, g);
+                        // 跳过注视点周围区域
+                        if (Math.hypot(p.x - g.cx, p.y - g.cy) < g.gapR) continue;
+
+                        const side = targetOf(c, r, g); // null=外周, 'left'/'right'=目标
+
+                        if (trial.feature === 'size') {
+                            // 圆环大小：绘制圆环(描边圆)，外周与目标半径不同
+                            let rf = S.baseR;
+                            if (side === 'left') rf = S.leftR;
+                            else if (side === 'right') rf = S.rightR;
+                            ctx.strokeStyle = '#000';
+                            ctx.lineWidth = Math.max(1.5, g.CELL * 0.09);
+                            ctx.beginPath();
+                            ctx.arc(p.x, p.y, rf * g.CELL, 0, 2 * Math.PI);
+                            ctx.stroke();
+
+                        } else if (trial.feature === 'shape') {
+                            // 形状：外周为圆形，目标为不同形状
+                            let shp = S.baseShape;
+                            if (side === 'left') shp = S.leftShape;
+                            else if (side === 'right') shp = S.rightShape;
+                            drawShape(p.x, p.y, g.CELL * 0.32, shp);
+
+                        } else if (trial.feature === 'gabor') {
+                            // Gabor 对比度：贴入相应对比度的 Gabor 贴图
+                            let patch = gaborPatches.base;
+                            if (side === 'left') patch = gaborPatches.left;
+                            else if (side === 'right') patch = gaborPatches.right;
+                            ctx.drawImage(patch, p.x - gaborPatches.size / 2, p.y - gaborPatches.size / 2);
+                        }
+                    }
+                }
+
+                drawFixation(g);
+            }
+
+            // 首帧绘制(静态刺激, 无需逐帧动画)
+            draw();
+
+            // 窗口尺寸变化时，重设画布、(必要时)重建 Gabor 贴图并重绘
+            const onResize = function () {
+                sizeCanvas();
+                if (trial.feature === 'gabor') buildGabor();
+                draw();
+            };
+            window.addEventListener('resize', onResize);
+
+            // ---- 呈现 trial_duration 毫秒后结束(本阶段不收集按键) ----
+            this.jsPsych.pluginAPI.setTimeout(function () {
+                window.removeEventListener('resize', onResize);
+                display_element.innerHTML = '';
+                self.jsPsych.finishTrial(trial.data);
+            }, trial.trial_duration);
+        }
+    }
+
+    SalienceMapPlugin.info = info;
+    return SalienceMapPlugin;
+})(jsPsychModule);
+
+/* =====================================================================
+ *  刺激生成
+ * =====================================================================*/
+function randInt(n) { return Math.floor(Math.random() * n); }
+
+// 根据特征、左/右显著性水平，生成一个 trial 的完整刺激参数。
+// 外周(base)为全屏统一的一个基础属性；左右目标 = base ± 对应水平的差异。
+function makeTrialStim(feature, leftLevel, rightLevel) {
+    // 显著性更高(水平更大)的一侧即为正确答案
+    const correctSide = leftLevel > rightLevel ? 'left' : 'right';
+    let stim = { feature: feature, correct_side: correctSide };
+
+    if (feature === 'size') {
+        const dL = LEVEL_DIFFS.size[leftLevel - 1];
+        const dR = LEVEL_DIFFS.size[rightLevel - 1];
+        const baseR = 0.30; // 外周圆环半径(占格子比例)
+        stim.baseR = baseR;
+        // 目标圆环更大或更小随机，但与外周的半径差固定
+        const sL = Math.random() < 0.5 ? 1 : -1;
+        const sR = Math.random() < 0.5 ? 1 : -1;
+        stim.leftR  = Math.max(0.10, Math.min(0.48, baseR + sL * dL));
+        stim.rightR = Math.max(0.10, Math.min(0.48, baseR + sR * dR));
+        stim.leftDiff = dL; stim.rightDiff = dR;
+
+    } else if (feature === 'shape') {
+        stim.baseShape = 'circle';               // 外周固定为圆形
+        stim.leftShape = SHAPES[leftLevel - 1];  // 目标形状(level 越大越尖锐/越显著)
+        stim.rightShape = SHAPES[rightLevel - 1];
+        stim.leftDiff = stim.leftShape; stim.rightDiff = stim.rightShape;
+
+    } else { // gabor
+        const dL = LEVEL_DIFFS.gabor[leftLevel - 1];
+        const dR = LEVEL_DIFFS.gabor[rightLevel - 1];
+        const baseContrast = 0.15; // 外周低对比度
+        stim.baseContrast = baseContrast;
+        stim.leftContrast  = Math.min(1, baseContrast + dL); // 目标对比度 = 外周 + 差异
+        stim.rightContrast = Math.min(1, baseContrast + dR);
+        stim.gaborDir = randInt(180); // 全屏统一的光栅朝向随机
+        stim.leftDiff = dL; stim.rightDiff = dR;
+    }
+    return stim;
+}
+
+// 打乱数组(Fisher–Yates)
+function shuffleArray(array) {
+    const a = [...array];
+    for (let i = a.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [a[i], a[j]] = [a[j], a[i]];
+    }
+    return a;
+}
+
+// 为一个特征维度生成所有条件：所有(左水平, 右水平)且两者不同的有序组合
+function generateConditions(feature, reps) {
+    const conds = [];
+    const N = numLevels(feature);
+    for (let rep = 0; rep < reps; rep++) {
+        for (let L = 1; L <= N; L++) {
+            for (let R = 1; R <= N; R++) {
+                if (L === R) continue; // 两侧必须不同，才有明确的正确答案
+                conds.push({ feature: feature, leftLevel: L, rightLevel: R });
+            }
+        }
+    }
+    return shuffleArray(conds);
+}
+
+// 注视点(HTML 版, 灰底黑十字)
+// 等待期注视十字(用两个 div 拼成，尺寸与画布上的注视十字完全相同)
+const FIX_HTML =
+    '<div style="position:relative;width:0;height:0;margin:auto;">' +
+    '<div style="position:absolute;left:' + (-FIX_ARM) + 'px;top:' + (-FIX_THICK / 2) + 'px;width:' + (2 * FIX_ARM) + 'px;height:' + FIX_THICK + 'px;background:' + FIX_COLOR + ';"></div>' +
+    '<div style="position:absolute;left:' + (-FIX_THICK / 2) + 'px;top:' + (-FIX_ARM) + 'px;width:' + FIX_THICK + 'px;height:' + (2 * FIX_ARM) + 'px;background:' + FIX_COLOR + ';"></div>' +
+    '</div>';
+
+// 由一个条件构造一个完整的试次序列：
+//   注视点(500) → 刺激(100) → 反应窗口(2000) → [练习反馈] → ITI(700)
+function buildTrial(cond, isPractice) {
+    const stim = makeTrialStim(cond.feature, cond.leftLevel, cond.rightLevel);
+
+    // 1. 刺激前注视点
+    const fixation = {
+        type: jsPsychHtmlKeyboardResponse,
+        stimulus: FIX_HTML,
+        choices: "NO_KEYS",
+        trial_duration: PARAMS.FIX_DURATION
+    };
+
+    // 2. 刺激呈现(100ms, 不收集按键)
+    const stimTrial = {
+        type: jsPsychSalienceMap,
+        feature: cond.feature,
+        stim: stim,
+        trial_duration: PARAMS.STIM_DURATION,
+        data: { trial_type_custom: 'stim', feature: cond.feature }
+    };
+
+    // 3. 反应窗口(2000ms, 仅注视点, 收集左/右方向键)
+    const response = {
+        type: jsPsychHtmlKeyboardResponse,
+        stimulus: FIX_HTML,
+        choices: [PARAMS.KEY_LEFT, PARAMS.KEY_RIGHT],
+        trial_duration: PARAMS.RESPONSE_DEADLINE,
+        data: {
+            trial_type_custom: 'salience',
+            feature: cond.feature,
+            left_level: cond.leftLevel,
+            right_level: cond.rightLevel,
+            left_diff: stim.leftDiff,
+            right_diff: stim.rightDiff,
+            correct_side: stim.correct_side,
+            is_practice: !!isPractice
+        },
+        on_finish: function (data) {
+            // 把按键换算成 'left'/'right'
+            let responseSide = null;
+            if (data.response) {
+                const k = String(data.response).toLowerCase();
+                if (k === PARAMS.KEY_LEFT) responseSide = 'left';
+                else if (k === PARAMS.KEY_RIGHT) responseSide = 'right';
+            }
+            data.response_side = responseSide;
+            // 正确性：与显著性更高的一侧比较；未反应则为 null
+            data.correct = responseSide === null ? null : (responseSide === data.correct_side);
+        }
+    };
+
+    // 4. 试次间隔
+    const iti = {
+        type: jsPsychHtmlKeyboardResponse,
+        stimulus: FIX_HTML,
+        choices: "NO_KEYS",
+        trial_duration: PARAMS.ITI_DURATION
+    };
+
+    const timeline = [fixation, stimTrial, response];
+
+    // 练习时给出对错反馈
+    if (isPractice) {
+        const feedback = {
+            type: jsPsychHtmlKeyboardResponse,
+            stimulus: function () {
+                const last = jsPsych.data.get().last(1).values()[0];
+                if (last.response_side === null) {
+                    return '<div style="font-size:28px;color:#B36B00;">太慢了，请更快反应</div>';
+                }
+                return last.correct
+                    ? '<div style="font-size:32px;color:#1B7F1B;">正确 ✓</div>'
+                    : '<div style="font-size:32px;color:#B00020;">错误 ✗</div>';
+            },
+            choices: "NO_KEYS",
+            trial_duration: 800
+        };
+        timeline.push(feedback);
+    }
+
+    timeline.push(iti);
+    return { timeline: timeline };
+}
+
+/* =====================================================================
+ *  实验数据 & jsPsych 初始化
+ * =====================================================================*/
+let experimentData = { subjectID: '', runNum: 1 };
+
+const jsPsych = initJsPsych({
+    on_finish: function () {
+        displayResults();
+        if (document.fullscreenElement) document.exitFullscreen();
+        document.body.classList.remove('hide-cursor');
+    }
+});
+
+let timeline = [];
+
+/* ---------------------- 全屏提示 ---------------------- */
+timeline.push({
+    type: jsPsychHtmlKeyboardResponse,
+    stimulus: `
+    <div style="text-align:center; font-size:24px; line-height:2; color:#000;">
+        <p style="font-size:32px; font-weight:bold;">显著性判断任务</p>
+        <p style="margin-top:40px;">实验需要在全屏模式下进行</p>
+        <p style="margin-top:30px; color:#B00020;"><strong>按任意键进入全屏并开始实验</strong></p>
+    </div>`,
+    on_finish: function () {
+        const el = document.documentElement;
+        if (el.requestFullscreen) el.requestFullscreen();
+    }
+});
+
+/* ---------------------- 被试信息收集 ---------------------- */
+timeline.push({
+    type: jsPsychSurveyText,
+    questions: [
+        { prompt: '被试姓名/编号:', name: 'name', required: true },
+        { prompt: 'Run编号:', name: 'run_num', required: true }
+    ],
+    button_label: '下一步',
+    on_finish: function (data) {
+        experimentData.subjectID = data.response.name;
+        experimentData.runNum = parseInt(data.response.run_num);
+        jsPsych.data.addProperties({
+            subject_id: experimentData.subjectID,
+            run_num: experimentData.runNum
+        });
+    }
+});
+
+/* ---------------------- 指导语 ---------------------- */
+timeline.push({
+    type: jsPsychHtmlKeyboardResponse,
+    stimulus: `
+    <div style="text-align:center; font-size:22px; line-height:1.9; color:#000;">
+        <p style="font-size:28px; font-weight:bold;">实验说明</p>
+        <p style="margin-top:24px;">整个屏幕会布满许多相同的小元素。请<strong>始终注视屏幕中央的 +</strong>。</p>
+        <p>在中央<strong>下方的左侧和右侧</strong>各有一小块区域，其属性与周围不同。</p>
+        <p>这一小块区域越“跳出来”、越吸引注意，该侧就越<strong style="color:#0B4DA1;">显著</strong>。</p>
+        <p style="margin-top:24px;">刺激只会<strong>短暂闪现(约0.1秒)</strong>，随后请在 <strong>2 秒内</strong>反应。</p>
+        <p style="margin-top:20px; color:#0B4DA1;">你的任务：判断<strong>左右两侧哪一侧更显著</strong>。</p>
+        <p style="font-size:24px; margin-top:16px;">
+            左侧更显著 → 按 <strong>←</strong> 键<br>
+            右侧更显著 → 按 <strong>→</strong> 键
+        </p>
+        <p style="margin-top:20px;">显著性可能由<strong>圆环大小、形状或 Gabor 对比度</strong>的差异造成，<br>但你只需判断哪一侧更“跳出来”即可。</p>
+        <p style="margin-top:28px; font-size:20px;">先做几个练习。按 <strong>空格键</strong> 开始练习。</p>
+    </div>`,
+    choices: [' '],
+    on_finish: function () { document.body.classList.add('hide-cursor'); }
+});
+
+/* ---------------------- 练习(每维度2个, 极端易分辨, 带反馈) ---------------------- */
+(function addPractice() {
+    let practiceConds = [];
+    FEATURES.forEach(function (f) {
+        const maxL = numLevels(f); // 该维度的最高显著性水平
+        practiceConds.push({ feature: f, leftLevel: maxL, rightLevel: 1 });
+        practiceConds.push({ feature: f, leftLevel: 1, rightLevel: maxL });
+    });
+    practiceConds = shuffleArray(practiceConds);
+    practiceConds.forEach(function (c) { timeline.push(buildTrial(c, true)); });
+})();
+
+/* ---------------------- 练习结束提示 ---------------------- */
+timeline.push({
+    type: jsPsychHtmlKeyboardResponse,
+    stimulus: `
+    <div style="text-align:center; font-size:24px; line-height:2; color:#000;">
+        <p style="font-size:28px; font-weight:bold; color:#1B7F1B;">练习结束</p>
+        <p style="margin-top:24px;">正式实验中不再有对错反馈。</p>
+        <p>请继续注视中央注视点，判断哪一侧更显著。</p>
+        <p style="margin-top:30px; font-size:20px;">按 <strong>空格键</strong> 开始正式实验。</p>
+    </div>`,
+    choices: [' ']
+});
+
+/* ---------------------- 正式实验(按特征分区块, 顺序随机) ---------------------- */
+const blockOrder = shuffleArray(FEATURES);
+
+blockOrder.forEach(function (feature, bIdx) {
+    timeline.push({
+        type: jsPsychHtmlKeyboardResponse,
+        stimulus: `
+        <div style="text-align:center; font-size:24px; line-height:2; color:#000;">
+            <p style="font-size:26px;">区块 ${bIdx + 1} / ${blockOrder.length}</p>
+            <p style="margin-top:20px;">本区块中，两侧的显著性由 <strong style="color:#0B4DA1;">${FEATURE_LABELS[feature]}</strong> 的差异造成。</p>
+            <p style="margin-top:16px;">判断哪一侧更显著：左侧按 <strong>←</strong>，右侧按 <strong>→</strong>。</p>
+            <p style="margin-top:30px; font-size:20px;">按 <strong>空格键</strong> 开始本区块。</p>
+        </div>`,
+        choices: [' ']
+    });
+
+    const conds = generateConditions(feature, PARAMS.REPS_PER_BLOCK);
+    conds.forEach(function (c) { timeline.push(buildTrial(c, false)); });
+});
+
+/* ---------------------- 结束页面 ---------------------- */
+timeline.push({
+    type: jsPsychHtmlKeyboardResponse,
+    stimulus: function () {
+        const trials = jsPsych.data.get().filter({ trial_type_custom: 'salience', is_practice: false });
+        const answered = trials.filter(function (t) { return t.response_side !== null; });
+        const correct = answered.filter({ correct: true });
+        const acc = answered.count() > 0 ? Math.round(correct.count() / answered.count() * 100) : 0;
+        const avgRT = correct.count() > 0 ? Math.round(correct.select('rt').mean()) : 0;
+        return `
+        <div style="font-size:24px; text-align:center; line-height:2; color:#000;">
+            <p style="font-size:32px; font-weight:bold; color:#1B7F1B;">实验结束，感谢参与!</p>
+            <p style="margin-top:30px;">完成试次: <strong style="color:#0B4DA1;">${answered.count()}</strong></p>
+            <p>总正确率: <strong style="color:#1B7F1B;">${acc}%</strong></p>
+            <p>平均反应时: <strong style="color:#0B4DA1;">${avgRT} ms</strong></p>
+            <p style="margin-top:40px; font-size:20px; color:#B00020;">按 <strong>空格键</strong> 下载数据</p>
+        </div>`;
+    },
+    choices: [' ']
+});
+
+/* =====================================================================
+ *  结果输出
+ * =====================================================================*/
+function displayResults() {
+    const trials = jsPsych.data.get().filter({ trial_type_custom: 'salience' });
+
+    const rows = trials.values().map(function (t) {
+        return {
+            subject_id: experimentData.subjectID,
+            run_num: experimentData.runNum,
+            is_practice: t.is_practice ? 1 : 0,
+            feature: t.feature,
+            left_level: t.left_level,     // 左侧显著性水平
+            right_level: t.right_level,   // 右侧显著性水平
+            left_diff: t.left_diff,       // 左侧目标-外周差异(数值或形状名)
+            right_diff: t.right_diff,
+            correct_side: t.correct_side, // 正确答案(更显著的一侧)
+            response_side: t.response_side === null ? '' : t.response_side,
+            correct: t.correct === null ? '' : (t.correct ? 1 : 0),
+            rt: t.rt === null || t.rt === undefined ? '' : Math.round(t.rt)
+        };
+    });
+
+    console.log('=== 显著性判断任务(灰底版)数据汇总 ===');
+    console.log('被试:', experimentData.subjectID, 'Run:', experimentData.runNum);
+    FEATURES.forEach(function (f) {
+        const ft = trials.filter({ feature: f, is_practice: false });
+        const ans = ft.filter(function (t) { return t.response_side !== null; });
+        const cor = ans.filter({ correct: true });
+        const acc = ans.count() > 0 ? (cor.count() / ans.count() * 100).toFixed(1) : 'N/A';
+        console.log(`${FEATURE_LABELS[f]}(${f}): N=${ans.count()}, 正确率=${acc}%`);
+    });
+
+    const csv = convertToCSV(rows);
+    const filename = `SalienceJudgment2_${experimentData.subjectID}_Run${experimentData.runNum}.csv`;
+    downloadCSV(csv, filename);
+    console.log('数据已保存为:', filename);
+}
+
+function convertToCSV(data) {
+    if (data.length === 0) return '';
+    const headers = Object.keys(data[0]);
+    let csv = headers.join(',') + '\n';
+    data.forEach(function (row) {
+        const values = headers.map(function (h) {
+            const v = row[h];
+            if (v === null || v === undefined || v === '') return '';
+            if (String(v).includes(',')) return `"${v}"`;
+            return v;
+        });
+        csv += values.join(',') + '\n';
+    });
+    return csv;
+}
+
+function downloadCSV(csvContent, filename) {
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const link = document.createElement('a');
+    link.setAttribute('href', URL.createObjectURL(blob));
+    link.setAttribute('download', filename);
+    link.style.visibility = 'hidden';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+}
+
+/* ---------------------- 运行实验 ---------------------- */
+jsPsych.run(timeline);
+</script>
+</html>
