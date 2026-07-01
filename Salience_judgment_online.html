@@ -128,21 +128,20 @@ const jsPsychSalienceMap = (function (jspsych) {
                 const w = canvas.width, h = canvas.height;
                 const cx = w / 2, cy = h / 2;                 // 屏幕中心(注视点位置)
                 const scale = Math.min(w, h) / 900;           // 依据窗口大小缩放，保证不同屏幕观感一致
-                const CELL = 24 * scale;                      // 每个元素占据的格子边长(元素较小)
-                // 网格行列数：向外多铺 2 圈，确保完全覆盖屏幕
+                const CELL = 46 * scale;                      // 每个元素占据的格子边长(元素更大、间距更大)
+                // 网格行列数：向外多铺 2 圈，确保完全覆盖整个屏幕(含上半部分)
                 const ncols = Math.ceil(w / CELL) + 2;
                 const nrows = Math.ceil(h / CELL) + 2;
                 const cCenter = (ncols - 1) / 2;              // 中心列(浮点)
                 const rCenter = (nrows - 1) / 2;              // 中心行(浮点)
-                // 目标区域相对中心的离心度(单位：格子)
-                const eccCols = Math.round(Math.min(w * 0.18, 260 * scale) / CELL); // 水平方向
-                const eccRows = Math.round((140 * scale) / CELL);                    // 垂直方向(下视野)
+                // 目标区域相对中心的水平离心度(单位：格子)；垂直方向放在屏幕正中央的左右两侧
+                const eccCols = Math.round(Math.min(w * 0.20, 320 * scale) / CELL);
                 const cC = Math.round(cCenter), rC = Math.round(rCenter);
-                // 左、右目标各占 2 列；均在中心下方 eccRows 处，占 2 行
+                // 左、右目标各占 2 列、2 行，位于屏幕垂直中央的左右两侧
                 const leftCols  = [cC - eccCols, cC - eccCols + 1];
                 const rightCols = [cC + eccCols - 1, cC + eccCols];
-                const tRows     = [rC + eccRows, rC + eccRows + 1];
-                const gapR = CELL * 1.3; // 注视点周围留空的半径(避免元素遮挡注视点)
+                const tRows     = [rC - 1, rC];
+                const gapR = CELL * 1.2; // 注视点周围留空的半径(避免元素遮挡注视点)
                 return { w, h, cx, cy, scale, CELL, ncols, nrows, cCenter, rCenter,
                          leftCols, rightCols, tRows, gapR };
             }
