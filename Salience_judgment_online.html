@@ -1,0 +1,650 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>显著性判断任务 (Salience Judgment)</title>
+    <script src="https://unpkg.com/jspsych@7.3.4"></script>
+    <script src="https://unpkg.com/@jspsych/plugin-html-keyboard-response@1.1.3"></script>
+    <script src="https://unpkg.com/@jspsych/plugin-survey-text@1.1.3"></script>
+    <link href="https://unpkg.com/jspsych@7.3.4/css/jspsych.css" rel="stylesheet" type="text/css" />
+    <style>
+        html, body {
+            background-color: #000;
+            margin: 0;
+            padding: 0;
+            height: 100%;
+        }
+        body { cursor: default; }
+        body.hide-cursor { cursor: none; }
+        .jspsych-display-element { color: #fff; }
+        .jspsych-content { max-width: 1100px; }
+    </style>
+</head>
+<body></body>
+<script>
+/* =====================================================================
+ *  显著性判断任务 (Salience Judgment, 2AFC)
+ *  参考 Attention_dis_online.html 改写。
+ *
+ *  不再判断椭圆朝向，而是在屏幕两侧（对应中央下方）呈现两个 salience map，
+ *  被试直接判断左右两侧哪个位置更显著 / 更吸引注意。
+ *
+ *  用 4 个特征维度制造显著性：方向(orientation)、颜色(color)、
+ *  对比度(contrast)、运动速度(motion)。
+ *
+ *  每个位置都是一个小的“salience map”：外周(surround)元素共享一个基础属性，
+ *  中央的 2x2 目标(target)子区域属性不同。目标与外周的差异 = 该侧的显著性。
+ *  差异有固定的 6 个水平（外周基础属性每个 trial 随机变化，但目标-外周差异固定）。
+ *
+ *  例如朝向：目标与外周朝向差 ∈ {15,30,45,60,75,90}° （对应 0/90、15/90 ... 75/90）。
+ * =====================================================================*/
+
+/* ---------------------- 实验参数 ---------------------- */
+const PARAMS = {
+    FIX_DURATION: 500,          // 刺激前注视 (ms)
+    RESPONSE_DEADLINE: 5000,    // 反应时限 (ms)，刺激保持到反应或超时
+    ITI_DURATION: 700,          // 试次间隔 (ms)
+    REPS_PER_BLOCK: 1,          // 每个特征维度中，每个(左,右)水平组合重复次数
+    KEY_LEFT: 'arrowleft',      // 左侧更显著
+    KEY_RIGHT: 'arrowright'     // 右侧更显著
+};
+
+// 4 个特征维度（顺序会被随机打乱）
+const FEATURES = ['orientation', 'color', 'contrast', 'motion'];
+
+// 特征维度的中文名
+const FEATURE_LABELS = {
+    orientation: '方向',
+    color: '颜色',
+    contrast: '对比度',
+    motion: '运动速度'
+};
+
+// 每个维度的 6 个显著性水平（目标与外周的差异），从低到高（level 1..6）
+// 索引越大 → 差异越大 → 越显著
+const LEVEL_DIFFS = {
+    orientation: [15, 30, 45, 60, 75, 90],      // 朝向角度差 (度)
+    color:       [30, 60, 90, 120, 150, 180],   // 色相差 (度)
+    contrast:    [24, 48, 72, 96, 120, 127],    // 亮度差 (灰阶)
+    motion:      [0.6, 1.2, 1.8, 2.4, 3.0, 3.6] // 速度差 (px/帧, 60fps 基准)
+};
+
+/* =====================================================================
+ *  自定义 jsPsych 插件: salience-map
+ *  在左右两个位置渲染 salience map, 收集"哪侧更显著"的 2AFC 反应。
+ *  支持静态特征(方向/颜色/对比度)与动态特征(运动速度)的动画渲染。
+ * =====================================================================*/
+const jsPsychSalienceMap = (function (jspsych) {
+    "use strict";
+
+    const info = {
+        name: 'salience-map',
+        parameters: {
+            feature:      { type: jspsych.ParameterType.STRING, default: 'orientation' },
+            stim_left:    { type: jspsych.ParameterType.OBJECT, default: {} },
+            stim_right:   { type: jspsych.ParameterType.OBJECT, default: {} },
+            choices:      { type: jspsych.ParameterType.KEYS,   default: [PARAMS.KEY_LEFT, PARAMS.KEY_RIGHT] },
+            trial_duration: { type: jspsych.ParameterType.INT,  default: PARAMS.RESPONSE_DEADLINE },
+            show_hint:    { type: jspsych.ParameterType.BOOL,   default: true },
+            data:         { type: jspsych.ParameterType.OBJECT, default: {} }
+        }
+    };
+
+    // 网格配置
+    const COLS = 6, ROWS = 6;
+    const TARGET_C = [2, 3], TARGET_R = [2, 3]; // 中央 2x2 目标区域
+
+    class SalienceMapPlugin {
+        constructor(jsPsych) { this.jsPsych = jsPsych; }
+
+        trial(display_element, trial) {
+            const self = this;
+
+            // ---- 建立铺满窗口的画布 ----
+            display_element.innerHTML =
+                '<canvas id="salience-canvas" style="position:fixed;top:0;left:0;"></canvas>';
+            const canvas = document.getElementById('salience-canvas');
+            const ctx = canvas.getContext('2d');
+
+            function sizeCanvas() {
+                canvas.width = window.innerWidth;
+                canvas.height = window.innerHeight;
+            }
+            sizeCanvas();
+
+            // ---- 几何布局 ----
+            function geom() {
+                const w = canvas.width, h = canvas.height;
+                const cx = w / 2, cy = h / 2;
+                const scale = Math.min(w, h) / 900;
+                const CELL = 30 * scale;
+                const patchW = COLS * CELL, patchH = ROWS * CELL;
+                const ECC_X = Math.min(w * 0.27, 430 * scale); // 水平离心度
+                const ECC_Y = 150 * scale;                      // 下视野偏移
+                return {
+                    w, h, cx, cy, scale, CELL, patchW, patchH,
+                    left:  { x: cx - ECC_X, y: cy + ECC_Y },
+                    right: { x: cx + ECC_X, y: cy + ECC_Y }
+                };
+            }
+
+            // ---- 为运动特征生成每个点的状态 ----
+            let motionState = null;
+            function buildMotionState() {
+                const g = geom();
+                function buildPatch(stim) {
+                    const dots = [];
+                    const dir = (stim.dirDeg || 0) * Math.PI / 180;
+                    const dx = Math.cos(dir), dy = Math.sin(dir);
+                    for (let c = 0; c < COLS; c++) {
+                        for (let r = 0; r < ROWS; r++) {
+                            const isTarget = TARGET_C.includes(c) && TARGET_R.includes(r);
+                            const speed = isTarget ? stim.targetSpeed : stim.baseSpeed;
+                            dots.push({
+                                c, r,
+                                ox: (Math.random() - 0.5) * g.CELL,
+                                oy: (Math.random() - 0.5) * g.CELL,
+                                vx: dx * speed, vy: dy * speed
+                            });
+                        }
+                    }
+                    return dots;
+                }
+                motionState = {
+                    left: buildPatch(trial.stim_left),
+                    right: buildPatch(trial.stim_right)
+                };
+            }
+            if (trial.feature === 'motion') buildMotionState();
+
+            // ---- 单个元素在网格中的中心坐标 ----
+            function cellCenter(center, g, c, r) {
+                return {
+                    x: center.x - g.patchW / 2 + (c + 0.5) * g.CELL,
+                    y: center.y - g.patchH / 2 + (r + 0.5) * g.CELL
+                };
+            }
+
+            // ---- 绘制一个 patch ----
+            function drawPatch(center, stim, side, g, dtFactor) {
+                for (let c = 0; c < COLS; c++) {
+                    for (let r = 0; r < ROWS; r++) {
+                        const isTarget = TARGET_C.includes(c) && TARGET_R.includes(r);
+                        const p = cellCenter(center, g, c, r);
+
+                        if (trial.feature === 'orientation') {
+                            const ang = (isTarget ? stim.targetAngle : stim.baseAngle) * Math.PI / 180;
+                            const len = g.CELL * 0.78, wid = g.CELL * 0.16;
+                            ctx.save();
+                            ctx.translate(p.x, p.y);
+                            ctx.rotate(ang);
+                            ctx.fillStyle = 'rgb(210,210,210)';
+                            ctx.fillRect(-len / 2, -wid / 2, len, wid);
+                            ctx.restore();
+
+                        } else if (trial.feature === 'color') {
+                            const hue = isTarget ? stim.targetHue : stim.baseHue;
+                            ctx.fillStyle = 'hsl(' + hue + ', 90%, 55%)';
+                            ctx.beginPath();
+                            ctx.arc(p.x, p.y, g.CELL * 0.34, 0, 2 * Math.PI);
+                            ctx.fill();
+
+                        } else if (trial.feature === 'contrast') {
+                            const lum = isTarget ? stim.targetLum : stim.baseLum;
+                            ctx.fillStyle = 'rgb(' + lum + ',' + lum + ',' + lum + ')';
+                            ctx.beginPath();
+                            ctx.arc(p.x, p.y, g.CELL * 0.34, 0, 2 * Math.PI);
+                            ctx.fill();
+
+                        } else if (trial.feature === 'motion') {
+                            const dots = motionState[side];
+                            const idx = c * ROWS + r;
+                            const d = dots[idx];
+                            d.ox += d.vx * dtFactor;
+                            d.oy += d.vy * dtFactor;
+                            const half = g.CELL / 2;
+                            if (d.ox > half) d.ox -= g.CELL; else if (d.ox < -half) d.ox += g.CELL;
+                            if (d.oy > half) d.oy -= g.CELL; else if (d.oy < -half) d.oy += g.CELL;
+                            ctx.fillStyle = 'rgb(205,205,205)';
+                            ctx.beginPath();
+                            ctx.arc(p.x + d.ox, p.y + d.oy, g.CELL * 0.28, 0, 2 * Math.PI);
+                            ctx.fill();
+                        }
+                    }
+                }
+            }
+
+            // ---- 绘制注视十字 ----
+            function drawFixation(g) {
+                ctx.strokeStyle = '#fff';
+                ctx.lineWidth = Math.max(2, 3 * g.scale);
+                const s = 10 * g.scale;
+                ctx.beginPath();
+                ctx.moveTo(g.cx - s, g.cy); ctx.lineTo(g.cx + s, g.cy);
+                ctx.moveTo(g.cx, g.cy - s); ctx.lineTo(g.cx, g.cy + s);
+                ctx.stroke();
+            }
+
+            // ---- 底部提示 ----
+            function drawHint(g) {
+                if (!trial.show_hint) return;
+                ctx.fillStyle = 'rgba(255,255,255,0.45)';
+                ctx.font = Math.round(16 * g.scale) + 'px sans-serif';
+                ctx.textAlign = 'center';
+                ctx.fillText('← 左侧更显著        右侧更显著 →', g.cx, g.h - 30 * g.scale);
+                ctx.textAlign = 'start';
+            }
+
+            // ---- 动画循环 ----
+            let rafId = null;
+            let lastTime = null;
+            function render(now) {
+                if (lastTime === null) lastTime = now;
+                const dtFactor = Math.min(3, (now - lastTime) / (1000 / 60)); // 帧率无关
+                lastTime = now;
+
+                const g = geom();
+                ctx.fillStyle = '#000';
+                ctx.fillRect(0, 0, g.w, g.h);
+                drawFixation(g);
+                drawPatch(g.left, trial.stim_left, 'left', g, dtFactor);
+                drawPatch(g.right, trial.stim_right, 'right', g, dtFactor);
+                drawHint(g);
+
+                rafId = requestAnimationFrame(render);
+            }
+            rafId = requestAnimationFrame(render);
+
+            const onResize = function () {
+                sizeCanvas();
+                if (trial.feature === 'motion') buildMotionState();
+            };
+            window.addEventListener('resize', onResize);
+
+            // ---- 反应收集 ----
+            const startTime = performance.now();
+            let responded = false;
+
+            const after_response = function (resp) {
+                if (responded) return;
+                responded = true;
+                end_trial(resp);
+            };
+
+            const kbListener = this.jsPsych.pluginAPI.getKeyboardResponse({
+                callback_function: after_response,
+                valid_responses: trial.choices,
+                rt_method: 'performance',
+                persist: false,
+                allow_held_key: false
+            });
+
+            let deadlineTimer = null;
+            if (trial.trial_duration !== null) {
+                deadlineTimer = this.jsPsych.pluginAPI.setTimeout(function () {
+                    after_response(null);
+                }, trial.trial_duration);
+            }
+
+            function end_trial(resp) {
+                if (rafId) cancelAnimationFrame(rafId);
+                if (deadlineTimer) self.jsPsych.pluginAPI.clearAllTimeouts();
+                self.jsPsych.pluginAPI.cancelAllKeyboardResponses();
+                window.removeEventListener('resize', onResize);
+
+                const key = resp ? resp.key : null;
+                const rt = resp ? resp.rt : null;
+                let responseSide = null;
+                if (key !== null) {
+                    const k = key.toLowerCase();
+                    if (k === PARAMS.KEY_LEFT) responseSide = 'left';
+                    else if (k === PARAMS.KEY_RIGHT) responseSide = 'right';
+                }
+                const correctSide = trial.data.correct_side;
+                const correct = responseSide !== null ? (responseSide === correctSide) : null;
+
+                const trial_data = {
+                    trial_type_custom: 'salience',
+                    feature: trial.feature,
+                    left_level: trial.data.left_level,
+                    right_level: trial.data.right_level,
+                    left_diff: trial.data.left_diff,
+                    right_diff: trial.data.right_diff,
+                    correct_side: correctSide,
+                    response_side: responseSide,
+                    response_key: key,
+                    correct: correct,
+                    rt: rt,
+                    is_practice: !!trial.data.is_practice,
+                    stim_left: JSON.stringify(trial.stim_left),
+                    stim_right: JSON.stringify(trial.stim_right)
+                };
+
+                display_element.innerHTML = '';
+                self.jsPsych.finishTrial(trial_data);
+            }
+        }
+    }
+
+    SalienceMapPlugin.info = info;
+    return SalienceMapPlugin;
+})(jsPsychModule);
+
+/* =====================================================================
+ *  刺激生成
+ * =====================================================================*/
+function randInt(n) { return Math.floor(Math.random() * n); }
+
+// 根据特征和左右显著性水平(1..6)，生成一个 trial 的刺激参数
+function makeStim(feature, level) {
+    const diff = LEVEL_DIFFS[feature][level - 1];
+    if (feature === 'orientation') {
+        const base = randInt(180);
+        return { baseAngle: base, targetAngle: base + diff, diff: diff };
+    } else if (feature === 'color') {
+        const base = randInt(360);
+        return { baseHue: base, targetHue: (base + diff) % 360, diff: diff };
+    } else if (feature === 'contrast') {
+        const baseLum = 128;                       // 外周固定中灰
+        const sign = Math.random() < 0.5 ? 1 : -1; // 目标更亮或更暗随机
+        let target = baseLum + sign * diff;
+        target = Math.max(0, Math.min(255, target));
+        return { baseLum: baseLum, targetLum: target, diff: Math.abs(target - baseLum) };
+    } else { // motion
+        const baseSpeed = 1.0;                     // 外周基础速度
+        return { baseSpeed: baseSpeed, targetSpeed: baseSpeed + diff, dirDeg: randInt(360), diff: diff };
+    }
+}
+
+// 打乱数组
+function shuffleArray(array) {
+    const a = [...array];
+    for (let i = a.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [a[i], a[j]] = [a[j], a[i]];
+    }
+    return a;
+}
+
+// 为一个特征维度生成所有条件：所有(左水平, 右水平)且两者不同的有序组合
+function generateConditions(feature, reps) {
+    const conds = [];
+    for (let rep = 0; rep < reps; rep++) {
+        for (let L = 1; L <= 6; L++) {
+            for (let R = 1; R <= 6; R++) {
+                if (L === R) continue; // 必须不同，才有正确答案
+                conds.push({ feature: feature, leftLevel: L, rightLevel: R });
+            }
+        }
+    }
+    return shuffleArray(conds);
+}
+
+// 由条件构造一个完整的 salience-map 试次(含前注视与ITI)
+function buildTrial(cond, isPractice) {
+    const stimLeft = makeStim(cond.feature, cond.leftLevel);
+    const stimRight = makeStim(cond.feature, cond.rightLevel);
+    const correctSide = cond.leftLevel > cond.rightLevel ? 'left' : 'right';
+
+    const fixation = {
+        type: jsPsychHtmlKeyboardResponse,
+        stimulus: '<div style="font-size:36px;color:#fff;">+</div>',
+        choices: "NO_KEYS",
+        trial_duration: PARAMS.FIX_DURATION
+    };
+
+    const stim = {
+        type: jsPsychSalienceMap,
+        feature: cond.feature,
+        stim_left: stimLeft,
+        stim_right: stimRight,
+        trial_duration: PARAMS.RESPONSE_DEADLINE,
+        data: {
+            left_level: cond.leftLevel,
+            right_level: cond.rightLevel,
+            left_diff: stimLeft.diff,
+            right_diff: stimRight.diff,
+            correct_side: correctSide,
+            is_practice: !!isPractice
+        }
+    };
+
+    const iti = {
+        type: jsPsychHtmlKeyboardResponse,
+        stimulus: '<div style="font-size:36px;color:#fff;">+</div>',
+        choices: "NO_KEYS",
+        trial_duration: PARAMS.ITI_DURATION
+    };
+
+    const timeline = [fixation, stim];
+
+    if (isPractice) {
+        const feedback = {
+            type: jsPsychHtmlKeyboardResponse,
+            stimulus: function () {
+                const last = jsPsych.data.get().last(1).values()[0];
+                if (last.response_side === null) {
+                    return '<div style="font-size:28px;color:#FF9800;">太慢了，请更快反应</div>';
+                }
+                return last.correct
+                    ? '<div style="font-size:32px;color:#4CAF50;">正确 ✓</div>'
+                    : '<div style="font-size:32px;color:#F44336;">错误 ✗</div>';
+            },
+            choices: "NO_KEYS",
+            trial_duration: 800
+        };
+        timeline.push(feedback);
+    }
+
+    timeline.push(iti);
+    return { timeline: timeline };
+}
+
+/* =====================================================================
+ *  实验数据 & jsPsych 初始化
+ * =====================================================================*/
+let experimentData = { subjectID: '', runNum: 1 };
+
+const jsPsych = initJsPsych({
+    on_finish: function () {
+        displayResults();
+        if (document.fullscreenElement) document.exitFullscreen();
+        document.body.classList.remove('hide-cursor');
+    }
+});
+
+let timeline = [];
+
+/* ---------------------- 全屏提示 ---------------------- */
+timeline.push({
+    type: jsPsychHtmlKeyboardResponse,
+    stimulus: `
+    <div style="text-align:center; font-size:24px; line-height:2; color:white;">
+        <p style="font-size:32px; font-weight:bold;">显著性判断任务</p>
+        <p style="margin-top:40px;">实验需要在全屏模式下进行</p>
+        <p style="margin-top:30px; color:#FF5722;"><strong>按任意键进入全屏并开始实验</strong></p>
+    </div>`,
+    on_finish: function () {
+        const el = document.documentElement;
+        if (el.requestFullscreen) el.requestFullscreen();
+    }
+});
+
+/* ---------------------- 被试信息 ---------------------- */
+timeline.push({
+    type: jsPsychSurveyText,
+    questions: [
+        { prompt: '<span style="color: white;">被试姓名/编号:</span>', name: 'name', required: true },
+        { prompt: '<span style="color: white;">Run编号:</span>', name: 'run_num', required: true }
+    ],
+    button_label: '下一步',
+    on_finish: function (data) {
+        experimentData.subjectID = data.response.name;
+        experimentData.runNum = parseInt(data.response.run_num);
+        jsPsych.data.addProperties({
+            subject_id: experimentData.subjectID,
+            run_num: experimentData.runNum
+        });
+    }
+});
+
+/* ---------------------- 指导语 ---------------------- */
+timeline.push({
+    type: jsPsychHtmlKeyboardResponse,
+    stimulus: `
+    <div style="text-align:center; font-size:22px; line-height:1.9; color:white;">
+        <p style="font-size:28px; font-weight:bold;">实验说明</p>
+        <p style="margin-top:24px;">请始终注视屏幕中央的 <strong>+</strong> 注视点。</p>
+        <p>屏幕中央<strong>下方的左侧和右侧</strong>会各出现一个由许多小元素组成的图案。</p>
+        <p>每个图案中央都有一小块区域与周围不同，这块区域越“跳出来”、越吸引注意，该侧就越<strong style="color:#FFD700;">显著</strong>。</p>
+        <p style="margin-top:24px; color:#FFD700;">你的任务：判断<strong>左右两侧哪一侧更显著</strong>。</p>
+        <p style="font-size:24px; margin-top:16px;">
+            左侧更显著 → 按 <strong>←</strong> 键<br>
+            右侧更显著 → 按 <strong>→</strong> 键
+        </p>
+        <p style="margin-top:24px; color:#FF9800;">请尽量<strong>又快又准</strong>地反应。</p>
+        <p style="margin-top:20px;">显著性可能由<strong>方向、颜色、对比度或运动速度</strong>的差异造成，<br>但无论如何，你只需判断哪一侧更“跳出来”。</p>
+        <p style="margin-top:30px; font-size:20px;">先做几个练习。按 <strong>空格键</strong> 开始练习。</p>
+    </div>`,
+    choices: [' '],
+    on_finish: function () { document.body.classList.add('hide-cursor'); }
+});
+
+/* ---------------------- 练习 (每维度2个, 极端易分辨) ---------------------- */
+(function addPractice() {
+    let practiceConds = [];
+    FEATURES.forEach(function (f) {
+        // 高显著(6) vs 低显著(1)，左右各一次
+        practiceConds.push({ feature: f, leftLevel: 6, rightLevel: 1 });
+        practiceConds.push({ feature: f, leftLevel: 1, rightLevel: 6 });
+    });
+    practiceConds = shuffleArray(practiceConds);
+    practiceConds.forEach(function (c) { timeline.push(buildTrial(c, true)); });
+})();
+
+/* ---------------------- 练习结束提示 ---------------------- */
+timeline.push({
+    type: jsPsychHtmlKeyboardResponse,
+    stimulus: `
+    <div style="text-align:center; font-size:24px; line-height:2; color:white;">
+        <p style="font-size:28px; font-weight:bold; color:#4CAF50;">练习结束</p>
+        <p style="margin-top:24px;">正式实验中不再有对错反馈。</p>
+        <p>请继续注视中央注视点，判断哪一侧更显著。</p>
+        <p style="margin-top:30px; font-size:20px;">按 <strong>空格键</strong> 开始正式实验。</p>
+    </div>`,
+    choices: [' ']
+});
+
+/* ---------------------- 正式实验 (按特征分区块, 顺序随机) ---------------------- */
+const blockOrder = shuffleArray(FEATURES);
+
+blockOrder.forEach(function (feature, bIdx) {
+    // 区块开始提示
+    timeline.push({
+        type: jsPsychHtmlKeyboardResponse,
+        stimulus: `
+        <div style="text-align:center; font-size:24px; line-height:2; color:white;">
+            <p style="font-size:26px;">区块 ${bIdx + 1} / ${blockOrder.length}</p>
+            <p style="margin-top:20px;">本区块中，两侧的显著性由 <strong style="color:#FFD700;">${FEATURE_LABELS[feature]}</strong> 的差异造成。</p>
+            <p style="margin-top:16px;">判断哪一侧更显著：左侧按 <strong>←</strong>，右侧按 <strong>→</strong>。</p>
+            <p style="margin-top:30px; font-size:20px;">按 <strong>空格键</strong> 开始本区块。</p>
+        </div>`,
+        choices: [' ']
+    });
+
+    const conds = generateConditions(feature, PARAMS.REPS_PER_BLOCK);
+    conds.forEach(function (c) { timeline.push(buildTrial(c, false)); });
+});
+
+/* ---------------------- 结束页面 ---------------------- */
+timeline.push({
+    type: jsPsychHtmlKeyboardResponse,
+    stimulus: function () {
+        const trials = jsPsych.data.get().filter({ trial_type_custom: 'salience', is_practice: false });
+        const answered = trials.filter(function (t) { return t.response_side !== null; });
+        const correct = answered.filter({ correct: true });
+        const acc = answered.count() > 0 ? Math.round(correct.count() / answered.count() * 100) : 0;
+        const avgRT = correct.count() > 0 ? Math.round(correct.select('rt').mean()) : 0;
+        return `
+        <div style="font-size:24px; text-align:center; line-height:2; color:white;">
+            <p style="font-size:32px; font-weight:bold; color:#4CAF50;">实验结束，感谢参与!</p>
+            <p style="margin-top:30px;">完成试次: <strong style="color:#2196F3;">${answered.count()}</strong></p>
+            <p>总正确率: <strong style="color:#4CAF50;">${acc}%</strong></p>
+            <p>平均反应时: <strong style="color:#2196F3;">${avgRT} ms</strong></p>
+            <p style="margin-top:40px; font-size:20px; color:#FF5722;">按 <strong>空格键</strong> 下载数据</p>
+        </div>`;
+    },
+    choices: [' ']
+});
+
+/* =====================================================================
+ *  结果输出
+ * =====================================================================*/
+function displayResults() {
+    const trials = jsPsych.data.get().filter({ trial_type_custom: 'salience' });
+
+    const rows = trials.values().map(function (t) {
+        return {
+            subject_id: experimentData.subjectID,
+            run_num: experimentData.runNum,
+            is_practice: t.is_practice ? 1 : 0,
+            feature: t.feature,
+            left_level: t.left_level,
+            right_level: t.right_level,
+            left_diff: t.left_diff,
+            right_diff: t.right_diff,
+            correct_side: t.correct_side,
+            response_side: t.response_side === null ? '' : t.response_side,
+            correct: t.correct === null ? '' : (t.correct ? 1 : 0),
+            rt: t.rt === null ? '' : Math.round(t.rt)
+        };
+    });
+
+    // 控制台汇总
+    console.log('=== 显著性判断任务数据汇总 ===');
+    console.log('被试:', experimentData.subjectID, 'Run:', experimentData.runNum);
+    FEATURES.forEach(function (f) {
+        const ft = trials.filter({ feature: f, is_practice: false });
+        const ans = ft.filter(function (t) { return t.response_side !== null; });
+        const cor = ans.filter({ correct: true });
+        const acc = ans.count() > 0 ? (cor.count() / ans.count() * 100).toFixed(1) : 'N/A';
+        console.log(`${FEATURE_LABELS[f]}(${f}): N=${ans.count()}, 正确率=${acc}%`);
+    });
+
+    const csv = convertToCSV(rows);
+    const filename = `SalienceJudgment_${experimentData.subjectID}_Run${experimentData.runNum}.csv`;
+    downloadCSV(csv, filename);
+    console.log('数据已保存为:', filename);
+}
+
+function convertToCSV(data) {
+    if (data.length === 0) return '';
+    const headers = Object.keys(data[0]);
+    let csv = headers.join(',') + '\n';
+    data.forEach(function (row) {
+        const values = headers.map(function (h) {
+            const v = row[h];
+            if (v === null || v === undefined || v === '') return '';
+            if (String(v).includes(',')) return `"${v}"`;
+            return v;
+        });
+        csv += values.join(',') + '\n';
+    });
+    return csv;
+}
+
+function downloadCSV(csvContent, filename) {
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const link = document.createElement('a');
+    link.setAttribute('href', URL.createObjectURL(blob));
+    link.setAttribute('download', filename);
+    link.style.visibility = 'hidden';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+}
+
+/* ---------------------- 运行 ---------------------- */
+jsPsych.run(timeline);
+</script>
+</html>
