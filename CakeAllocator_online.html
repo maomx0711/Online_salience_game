@@ -1,0 +1,1015 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>蛋糕分配者游戏</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+            min-height: 100vh;
+            color: #eee;
+            overflow-x: hidden;
+        }
+
+        .screen { display: none; min-height: 100vh; padding: 24px; }
+        .screen.active { display: flex; flex-direction: column; align-items: center; }
+
+        h1 { font-size: 2rem; margin-bottom: 16px; color: #ffd700; text-align: center; }
+        h2 { font-size: 1.4rem; margin-bottom: 12px; color: #87ceeb; }
+
+        .card {
+            background: rgba(255, 255, 255, 0.08);
+            border-radius: 16px;
+            padding: 24px 32px;
+            max-width: 900px;
+            width: 100%;
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+        }
+
+        .instructions { line-height: 1.9; font-size: 1.05rem; }
+        .instructions ul { margin: 12px 0 12px 24px; }
+        .instructions li { margin: 6px 0; }
+
+        .price-table {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 12px;
+            margin: 20px 0;
+        }
+
+        .price-item {
+            text-align: center;
+            padding: 12px;
+            border-radius: 10px;
+            font-weight: bold;
+        }
+
+        .btn {
+            padding: 12px 32px;
+            font-size: 1.1rem;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: transform 0.15s, box-shadow 0.15s;
+            font-family: inherit;
+        }
+
+        .btn:hover { transform: translateY(-2px); box-shadow: 0 4px 16px rgba(0,0,0,0.3); }
+        .btn:active { transform: translateY(0); }
+        .btn-primary { background: #4caf50; color: white; }
+        .btn-danger { background: #e53935; color: white; }
+        .btn-secondary { background: #546e7a; color: white; }
+        .btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+
+        .form-group { margin: 16px 0; }
+        .form-group label { display: block; margin-bottom: 6px; }
+        .form-group input {
+            padding: 10px 14px;
+            font-size: 1rem;
+            border-radius: 6px;
+            border: 1px solid rgba(255,255,255,0.2);
+            background: rgba(0,0,0,0.3);
+            color: white;
+            width: 240px;
+        }
+
+        /* Game layout */
+        .game-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            width: 100%;
+            max-width: 1100px;
+            margin-bottom: 16px;
+            flex-wrap: wrap;
+            gap: 12px;
+        }
+
+        .stat-box {
+            background: rgba(0,0,0,0.35);
+            padding: 10px 20px;
+            border-radius: 10px;
+            font-size: 1.1rem;
+        }
+
+        .stat-box .value { color: #ffd700; font-weight: bold; font-size: 1.3rem; }
+
+        .timer { font-size: 1.5rem; }
+        .timer.warning { color: #ff5722; animation: pulse 1s infinite; }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.6; }
+        }
+
+        .game-main {
+            display: flex;
+            gap: 24px;
+            width: 100%;
+            max-width: 1100px;
+            flex-wrap: wrap;
+            justify-content: center;
+        }
+
+        .cakes-panel {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 16px;
+            flex: 1;
+            min-width: 280px;
+        }
+
+        .cake-slot {
+            background: rgba(0,0,0,0.25);
+            border-radius: 12px;
+            padding: 12px;
+            text-align: center;
+            cursor: pointer;
+            border: 3px solid transparent;
+            transition: border-color 0.2s, transform 0.15s;
+        }
+
+        .cake-slot:hover:not(.empty) { transform: scale(1.02); }
+        .cake-slot.selected { border-color: #ffd700; box-shadow: 0 0 20px rgba(255,215,0,0.4); }
+        .cake-slot.empty { opacity: 0.4; cursor: not-allowed; }
+        .cake-slot.need-cut { border-color: #ff9800; animation: glow 1.5s infinite; }
+
+        @keyframes glow {
+            0%, 100% { box-shadow: 0 0 8px rgba(255,152,0,0.5); }
+            50% { box-shadow: 0 0 20px rgba(255,152,0,0.8); }
+        }
+
+        .cake-slot canvas { display: block; margin: 0 auto; }
+        .cake-label { font-size: 0.9rem; margin-top: 6px; }
+        .cake-remaining { font-size: 0.8rem; color: #aaa; }
+
+        .work-panel {
+            flex: 1;
+            min-width: 320px;
+            max-width: 420px;
+        }
+
+        .customer-card {
+            background: rgba(255,255,255,0.1);
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 16px;
+            border-left: 5px solid #4fc3f7;
+        }
+
+        .customer-card .order {
+            font-size: 1.3rem;
+            margin: 10px 0;
+            color: #fff;
+        }
+
+        .customer-card .hint {
+            font-size: 0.9rem;
+            color: #aaa;
+        }
+
+        .cut-area {
+            background: rgba(0,0,0,0.3);
+            border-radius: 12px;
+            padding: 16px;
+            text-align: center;
+        }
+
+        .cut-area canvas {
+            cursor: crosshair;
+            border-radius: 50%;
+            display: block;
+            margin: 0 auto;
+        }
+
+        .cut-controls {
+            margin-top: 12px;
+            display: flex;
+            gap: 10px;
+            justify-content: center;
+            flex-wrap: wrap;
+        }
+
+        .feedback {
+            margin-top: 12px;
+            padding: 10px;
+            border-radius: 8px;
+            font-size: 0.95rem;
+            min-height: 40px;
+        }
+
+        .feedback.success { background: rgba(76,175,80,0.3); }
+        .feedback.error { background: rgba(244,67,54,0.3); }
+        .feedback.info { background: rgba(33,150,243,0.3); }
+        .feedback.penalty { background: rgba(183,28,28,0.45); border: 1px solid #ef5350; }
+
+        .waiting-msg {
+            text-align: center;
+            padding: 40px 20px;
+            color: #aaa;
+            font-size: 1.1rem;
+        }
+
+        .practice-info {
+            text-align: center;
+            margin-bottom: 16px;
+            font-size: 1.1rem;
+        }
+
+        .results-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 16px;
+            font-size: 0.9rem;
+        }
+
+        .results-table th, .results-table td {
+            border: 1px solid rgba(255,255,255,0.15);
+            padding: 8px 12px;
+            text-align: center;
+        }
+
+        .results-table th { background: rgba(0,0,0,0.3); }
+
+        .color-dot {
+            display: inline-block;
+            width: 14px;
+            height: 14px;
+            border-radius: 50%;
+            vertical-align: middle;
+            margin-right: 6px;
+        }
+    </style>
+</head>
+<body>
+
+<!-- Welcome / Subject Info -->
+<div id="screen-welcome" class="screen active">
+    <div class="card">
+        <h1>🎂 蛋糕分配者游戏</h1>
+        <p class="instructions" style="margin-top:16px;">
+            欢迎参加本实验！您将扮演一名蛋糕售卖员。
+        </p>
+        <div class="form-group" style="margin-top:24px;">
+            <label for="subject-id">被试编号：</label>
+            <input type="text" id="subject-id" placeholder="请输入编号" required>
+        </div>
+        <div style="text-align:center; margin-top:24px;">
+            <button class="btn btn-primary" id="btn-start-intro">开始</button>
+        </div>
+    </div>
+</div>
+
+<!-- Instructions -->
+<div id="screen-instructions" class="screen">
+    <div class="card">
+        <h1>实验说明</h1>
+        <div class="instructions">
+            <p>店里有<strong>四种蛋糕</strong>，每种价格不同（按斤计价）：</p>
+            <div class="price-table">
+                <div class="price-item" style="background:#e53935;">🔴 红色<br>8元/斤</div>
+                <div class="price-item" style="background:#43a047;">🟢 绿色<br>6元/斤</div>
+                <div class="price-item" style="background:#37474f; color:#fff;">⚫ 黑色<br>4元/斤</div>
+                <div class="price-item" style="background:#fdd835; color:#333;">🟡 黄色<br>2元/斤</div>
+            </div>
+            <ul>
+                <li>每种蛋糕是一块<strong>圆形</strong>，您需要为顾客切下对应分量的蛋糕。</li>
+                <li>您<strong>不能称重</strong>，只能凭感觉切出合适的大小。</li>
+                <li>切完后，蛋糕会相应减少。</li>
+                <li>顾客会购买不同种类、不同金额（元）的蛋糕，例如"购买10元红色蛋糕"。</li>
+                <li>实验限时 <strong>10分钟</strong>，您不知道共有多少位顾客。</li>
+                <li>卖出越多，收入越高。时间结束后剩余蛋糕无法再售卖。</li>
+                <li>若蛋糕提前卖完，将不再有顾客，直到时间结束。</li>
+                <li style="color:#ef5350;"><strong>惩罚规则：</strong>若切下的蛋糕与所需分量相差超过一半，将<strong>扣除本次订单的金额</strong>。</li>
+            </ul>
+            <p style="margin-top:16px; color:#ffd700;">首先进入<strong>练习阶段</strong>，学习切出一斤（500克）蛋糕的大小。</p>
+        </div>
+        <div style="text-align:center; margin-top:24px;">
+            <button class="btn btn-primary" id="btn-start-practice">开始练习</button>
+        </div>
+    </div>
+</div>
+
+<!-- Practice -->
+<div id="screen-practice" class="screen">
+    <div class="card" style="max-width:600px;">
+        <h1>练习阶段</h1>
+        <p class="practice-info" id="practice-round-info">第 1 / 5 轮练习</p>
+        <p class="practice-info">请从下方蛋糕中切出 <strong style="color:#ffd700;">1斤（500克）</strong> 的蛋糕</p>
+        <div class="cut-area">
+            <canvas id="practice-canvas" width="300" height="300"></canvas>
+            <div class="cut-controls">
+                <button class="btn btn-secondary" id="btn-practice-reset">重新画</button>
+                <button class="btn btn-primary" id="btn-practice-cut">确认切割</button>
+            </div>
+            <div class="feedback info" id="practice-feedback">在蛋糕上拖动鼠标，画出要切下的扇形区域</div>
+        </div>
+        <p style="text-align:center; margin-top:16px; color:#aaa; font-size:0.9rem;">
+            练习蛋糕剩余：10斤 | 1斤 ≈ 圆面积的 10%
+        </p>
+    </div>
+</div>
+
+<!-- Main Game -->
+<div id="screen-game" class="screen">
+    <div class="game-header">
+        <div class="stat-box">收入：<span class="value" id="stat-money">0</span> 元</div>
+        <div class="stat-box">已服务：<span class="value" id="stat-customers">0</span> 位顾客</div>
+        <div class="stat-box timer" id="stat-timer">10:00</div>
+    </div>
+
+    <div class="game-main">
+        <div class="cakes-panel" id="cakes-panel"></div>
+
+        <div class="work-panel">
+            <div id="customer-area">
+                <div class="waiting-msg" id="waiting-msg">等待顾客...</div>
+            </div>
+            <div class="cut-area" id="cut-area" style="display:none;">
+                <p style="margin-bottom:8px; color:#aaa;">拖动鼠标画出要切下的扇形</p>
+                <canvas id="game-cut-canvas" width="280" height="280"></canvas>
+                <div class="cut-controls">
+                    <button class="btn btn-secondary" id="btn-game-reset">重新画</button>
+                    <button class="btn btn-primary" id="btn-game-cut">确认切割并交给顾客</button>
+                </div>
+                <div class="feedback info" id="game-feedback"></div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Results -->
+<div id="screen-results" class="screen">
+    <div class="card">
+        <h1>实验结束</h1>
+        <div id="results-summary" style="font-size:1.1rem; line-height:2;"></div>
+        <table class="results-table" id="results-table">
+            <thead>
+                <tr>
+                    <th>序号</th>
+                    <th>蛋糕</th>
+                    <th>要求(元)</th>
+                    <th>需要(斤)</th>
+                    <th>实际(斤)</th>
+                    <th>误差(斤)</th>
+                    <th>收入(元)</th>
+                    <th>扣款</th>
+                    <th>用时(s)</th>
+                </tr>
+            </thead>
+            <tbody id="results-tbody"></tbody>
+        </table>
+        <div style="text-align:center; margin-top:24px;">
+            <button class="btn btn-primary" id="btn-download">下载实验数据</button>
+        </div>
+    </div>
+</div>
+
+<script>
+(function () {
+    'use strict';
+
+    const CAKES = {
+        red:    { name: '红色', color: '#e53935', stroke: '#b71c1c', price: 8 },
+        green:  { name: '绿色', color: '#43a047', stroke: '#1b5e20', price: 6 },
+        black:  { name: '黑色', color: '#37474f', stroke: '#263238', price: 4 },
+        yellow: { name: '黄色', color: '#fdd835', stroke: '#f9a825', price: 2 }
+    };
+
+    const INITIAL_WEIGHT = 10;       // 每种蛋糕初始10斤
+    const GAME_DURATION_MS = 10 * 60 * 1000;
+    const PRACTICE_ROUNDS = 5;
+    const CUSTOMER_INTERVAL_MIN = 2000;
+    const CUSTOMER_INTERVAL_MAX = 5000;
+    const ORDER_AMOUNTS = [4, 6, 8, 10, 12, 14, 16, 18, 20, 24, 28, 32, 36, 40];
+
+    let subjectId = '';
+    let practiceData = [];
+    let gameData = [];
+    let cakes = {};
+    let totalMoney = 0;
+    let customerCount = 0;
+    let gameStartTime = 0;
+    let gameEndTime = 0;
+    let timerInterval = null;
+    let customerTimeout = null;
+    let currentCustomer = null;
+    let customerStartTime = 0;
+    let selectedCakeKey = null;
+    let gamePhase = 'active'; // 'active' | 'soldout' | 'ended'
+    let practiceRound = 0;
+    let practiceRemaining = INITIAL_WEIGHT;
+
+    // --- Screen management ---
+    function showScreen(id) {
+        document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+        document.getElementById(id).classList.add('active');
+    }
+
+    // --- Cake drawing utilities ---
+    function drawCake(ctx, cx, cy, radius, cakeKey, remainingWeight, totalWeight, sliceAngle, sliceStartAngle) {
+        const info = CAKES[cakeKey];
+        const remainingFraction = remainingWeight / totalWeight;
+        const totalAngle = remainingFraction * 2 * Math.PI;
+        const startAngle = -Math.PI / 2;
+
+        ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+
+        // Plate
+        ctx.beginPath();
+        ctx.arc(cx, cy, radius + 6, 0, 2 * Math.PI);
+        ctx.fillStyle = '#eceff1';
+        ctx.fill();
+        ctx.strokeStyle = '#b0bec5';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+
+        if (remainingWeight <= 0.01) return;
+
+        // Remaining cake body
+        ctx.beginPath();
+        ctx.moveTo(cx, cy);
+        ctx.arc(cx, cy, radius, startAngle, startAngle + totalAngle);
+        ctx.closePath();
+
+        const grad = ctx.createRadialGradient(cx - radius * 0.2, cy - radius * 0.2, 0, cx, cy, radius);
+        grad.addColorStop(0, lighten(info.color, 30));
+        grad.addColorStop(1, info.color);
+        ctx.fillStyle = grad;
+        ctx.fill();
+        ctx.strokeStyle = info.stroke;
+        ctx.lineWidth = 2;
+        ctx.stroke();
+
+        // Slice preview
+        if (sliceAngle > 0) {
+            const actualSlice = Math.min(sliceAngle, totalAngle);
+            const sliceStart = sliceStartAngle !== undefined ? sliceStartAngle : startAngle;
+            ctx.beginPath();
+            ctx.moveTo(cx, cy);
+            ctx.arc(cx, cy, radius, sliceStart, sliceStart + actualSlice);
+            ctx.closePath();
+            ctx.fillStyle = 'rgba(255, 255, 255, 0.45)';
+            ctx.fill();
+            ctx.strokeStyle = '#fff';
+            ctx.lineWidth = 2;
+            ctx.setLineDash([4, 4]);
+            ctx.stroke();
+            ctx.setLineDash([]);
+
+            // Cut line
+            ctx.beginPath();
+            ctx.moveTo(cx, cy);
+            ctx.lineTo(cx + radius * Math.cos(sliceStart), cy + radius * Math.sin(sliceStart));
+            ctx.strokeStyle = '#fff';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+
+            ctx.beginPath();
+            ctx.moveTo(cx, cy);
+            ctx.lineTo(cx + radius * Math.cos(sliceStart + actualSlice), cy + radius * Math.sin(sliceStart + actualSlice));
+            ctx.stroke();
+        }
+    }
+
+    function lighten(hex, percent) {
+        const num = parseInt(hex.replace('#', ''), 16);
+        const r = Math.min(255, (num >> 16) + percent);
+        const g = Math.min(255, ((num >> 8) & 0xff) + percent);
+        const b = Math.min(255, (num & 0xff) + percent);
+        return `rgb(${r},${g},${b})`;
+    }
+
+    function weightFromAngle(angleRad, remainingWeight, remainingAngleRad) {
+        if (remainingAngleRad <= 0) return 0;
+        return (angleRad / remainingAngleRad) * remainingWeight;
+    }
+
+    function isExcessiveError(actualWeight, requiredWeight) {
+        return Math.abs(actualWeight - requiredWeight) > requiredWeight * 0.5;
+    }
+
+    function calcItemEarnings(actualWeight, requiredWeight, orderAmountYuan, price) {
+        if (isExcessiveError(actualWeight, requiredWeight)) {
+            return {
+                penalized: true,
+                earned: -orderAmountYuan,
+                orderAmount: orderAmountYuan
+            };
+        }
+        return {
+            penalized: false,
+            earned: Math.round(actualWeight * price * 100) / 100,
+            orderAmount: orderAmountYuan
+        };
+    }
+
+    // --- Slice interaction ---
+    function createSliceHandler(canvas, getCakeState, onSliceChange) {
+        let isDragging = false;
+        let sliceAngle = 0;
+        let sliceStartAngle = -Math.PI / 2;
+        const cx = canvas.width / 2;
+        const cy = canvas.height / 2;
+        const radius = Math.min(cx, cy) - 20;
+
+        function getAngleFromEvent(e) {
+            const rect = canvas.getBoundingClientRect();
+            const scaleX = canvas.width / rect.width;
+            const scaleY = canvas.height / rect.height;
+            const x = (e.clientX - rect.left) * scaleX - cx;
+            const y = (e.clientY - rect.top) * scaleY - cy;
+            return Math.atan2(y, x);
+        }
+
+        function redraw() {
+            const state = getCakeState();
+            drawCake(canvas.getContext('2d'), cx, cy, radius, state.cakeKey, state.remaining, state.total, sliceAngle, sliceStartAngle);
+            if (onSliceChange) onSliceChange(sliceAngle, sliceStartAngle);
+        }
+
+        function reset() {
+            sliceAngle = 0;
+            sliceStartAngle = -Math.PI / 2;
+            redraw();
+        }
+
+        canvas.addEventListener('mousedown', (e) => {
+            isDragging = true;
+            sliceStartAngle = getAngleFromEvent(e);
+            sliceAngle = 0;
+            redraw();
+        });
+
+        canvas.addEventListener('mousemove', (e) => {
+            if (!isDragging) return;
+            const currentAngle = getAngleFromEvent(e);
+            let diff = currentAngle - sliceStartAngle;
+            if (diff < 0) diff += 2 * Math.PI;
+            const state = getCakeState();
+            const maxAngle = (state.remaining / state.total) * 2 * Math.PI;
+            sliceAngle = Math.min(diff, maxAngle);
+            redraw();
+        });
+
+        canvas.addEventListener('mouseup', () => { isDragging = false; });
+        canvas.addEventListener('mouseleave', () => { isDragging = false; });
+
+        // Touch support
+        canvas.addEventListener('touchstart', (e) => {
+            e.preventDefault();
+            isDragging = true;
+            const touch = e.touches[0];
+            sliceStartAngle = getAngleFromEvent(touch);
+            sliceAngle = 0;
+            redraw();
+        }, { passive: false });
+
+        canvas.addEventListener('touchmove', (e) => {
+            e.preventDefault();
+            if (!isDragging) return;
+            const touch = e.touches[0];
+            const currentAngle = getAngleFromEvent(touch);
+            let diff = currentAngle - sliceStartAngle;
+            if (diff < 0) diff += 2 * Math.PI;
+            const state = getCakeState();
+            const maxAngle = (state.remaining / state.total) * 2 * Math.PI;
+            sliceAngle = Math.min(diff, maxAngle);
+            redraw();
+        }, { passive: false });
+
+        canvas.addEventListener('touchend', () => { isDragging = false; });
+
+        return {
+            getSliceAngle: () => sliceAngle,
+            getSliceStartAngle: () => sliceStartAngle,
+            reset,
+            redraw,
+            getRadius: () => radius,
+            getCenter: () => ({ cx, cy })
+        };
+    }
+
+    // --- Practice phase ---
+    let practiceHandler = null;
+
+    function initPractice() {
+        practiceRound = 0;
+        practiceData = [];
+        practiceRemaining = INITIAL_WEIGHT;
+        nextPracticeRound();
+    }
+
+    function nextPracticeRound() {
+        practiceRound++;
+        if (practiceRound > PRACTICE_ROUNDS) {
+            showScreen('screen-game');
+            initGame();
+            return;
+        }
+
+        document.getElementById('practice-round-info').textContent = `第 ${practiceRound} / ${PRACTICE_ROUNDS} 轮练习`;
+        document.getElementById('practice-feedback').className = 'feedback info';
+        document.getElementById('practice-feedback').textContent = '在蛋糕上拖动鼠标，画出要切下的扇形区域';
+
+        const canvas = document.getElementById('practice-canvas');
+        practiceHandler = createSliceHandler(canvas, () => ({
+            cakeKey: 'yellow',
+            remaining: practiceRemaining,
+            total: INITIAL_WEIGHT
+        }));
+
+        practiceHandler.reset();
+    }
+
+    function confirmPracticeCut() {
+        const angle = practiceHandler.getSliceAngle();
+        if (angle < 0.05) {
+            document.getElementById('practice-feedback').className = 'feedback error';
+            document.getElementById('practice-feedback').textContent = '请先拖动鼠标画出要切的区域';
+            return;
+        }
+
+        const actualWeight = weightFromAngle(angle, practiceRemaining, (practiceRemaining / INITIAL_WEIGHT) * 2 * Math.PI);
+        const error = actualWeight - 1;
+        const absError = Math.abs(error);
+
+        practiceData.push({
+            round: practiceRound,
+            targetWeight: 1,
+            actualWeight: Math.round(actualWeight * 100) / 100,
+            error: Math.round(error * 100) / 100,
+            absError: Math.round(absError * 100) / 100
+        });
+
+        practiceRemaining = Math.max(0, practiceRemaining - actualWeight);
+
+        let msg = `您切了 ${actualWeight.toFixed(2)} 斤（目标 1.00 斤），误差 ${error >= 0 ? '+' : ''}${error.toFixed(2)} 斤`;
+        if (absError <= 0.15) msg += ' — 很棒！';
+        else if (absError <= 0.3) msg += ' — 还不错';
+        else msg += ' — 继续练习，记住这个大小';
+
+        document.getElementById('practice-feedback').className = 'feedback ' + (absError <= 0.3 ? 'success' : 'info');
+        document.getElementById('practice-feedback').textContent = msg;
+
+        document.getElementById('btn-practice-cut').disabled = true;
+        setTimeout(() => {
+            document.getElementById('btn-practice-cut').disabled = false;
+            nextPracticeRound();
+        }, 2000);
+    }
+
+    // --- Main game ---
+    let gameCutHandler = null;
+
+    function initGame() {
+        cakes = {};
+        Object.keys(CAKES).forEach(key => {
+            cakes[key] = { remaining: INITIAL_WEIGHT, total: INITIAL_WEIGHT };
+        });
+
+        totalMoney = 0;
+        customerCount = 0;
+        gamePhase = 'active';
+        currentCustomer = null;
+        gameData = [];
+
+        updateStats();
+        renderCakePanel();
+
+        gameStartTime = Date.now();
+        gameEndTime = gameStartTime + GAME_DURATION_MS;
+
+        timerInterval = setInterval(updateTimer, 200);
+        scheduleNextCustomer();
+    }
+
+    function updateTimer() {
+        const remaining = Math.max(0, gameEndTime - Date.now());
+        const mins = Math.floor(remaining / 60000);
+        const secs = Math.floor((remaining % 60000) / 1000);
+        const el = document.getElementById('stat-timer');
+        el.textContent = `${mins}:${secs.toString().padStart(2, '0')}`;
+        if (remaining < 60000) el.classList.add('warning');
+        else el.classList.remove('warning');
+
+        if (remaining <= 0) {
+            endGame();
+        }
+    }
+
+    function updateStats() {
+        document.getElementById('stat-money').textContent = totalMoney.toFixed(2);
+        document.getElementById('stat-customers').textContent = customerCount;
+    }
+
+    function allCakesEmpty() {
+        return Object.values(cakes).every(c => c.remaining < 0.05);
+    }
+
+    function renderCakePanel() {
+        const panel = document.getElementById('cakes-panel');
+        panel.innerHTML = '';
+
+        Object.keys(CAKES).forEach(key => {
+            const info = CAKES[key];
+            const cake = cakes[key];
+            const isEmpty = cake.remaining < 0.05;
+            const isSelected = selectedCakeKey === key;
+            const isNeeded = currentCustomer && currentCustomer.cakeKey === key;
+
+            const slot = document.createElement('div');
+            slot.className = 'cake-slot' + (isEmpty ? ' empty' : '') + (isSelected ? ' selected' : '') + (isNeeded && !isEmpty ? ' need-cut' : '');
+            slot.dataset.key = key;
+
+            const canvas = document.createElement('canvas');
+            canvas.width = 140;
+            canvas.height = 140;
+            const ctx = canvas.getContext('2d');
+            drawCake(ctx, 70, 70, 55, key, cake.remaining, cake.total, 0);
+
+            slot.innerHTML = '';
+            slot.appendChild(canvas);
+            const label = document.createElement('div');
+            label.className = 'cake-label';
+            label.innerHTML = `<span class="color-dot" style="background:${info.color}"></span>${info.name} ${info.price}元/斤`;
+            slot.appendChild(label);
+            const rem = document.createElement('div');
+            rem.className = 'cake-remaining';
+            rem.textContent = isEmpty ? '已售完' : `剩余 ${cake.remaining.toFixed(1)} 斤`;
+            slot.appendChild(rem);
+
+            if (!isEmpty) {
+                slot.addEventListener('click', () => selectCake(key));
+            }
+
+            panel.appendChild(slot);
+        });
+    }
+
+    function scheduleNextCustomer() {
+        if (gamePhase !== 'active') return;
+
+        if (allCakesEmpty()) {
+            gamePhase = 'soldout';
+            document.getElementById('waiting-msg').textContent = '所有蛋糕已售完，请等待时间结束...';
+            document.getElementById('waiting-msg').style.display = 'block';
+            document.getElementById('customer-area').querySelector('.customer-card')?.remove();
+            document.getElementById('cut-area').style.display = 'none';
+            return;
+        }
+
+        const delay = CUSTOMER_INTERVAL_MIN + Math.random() * (CUSTOMER_INTERVAL_MAX - CUSTOMER_INTERVAL_MIN);
+        customerTimeout = setTimeout(() => {
+            if (gamePhase === 'active' && Date.now() < gameEndTime) {
+                spawnCustomer();
+            }
+        }, delay);
+    }
+
+    function spawnCustomer() {
+        if (gamePhase !== 'active' || allCakesEmpty()) return;
+
+        const availableKeys = Object.keys(cakes).filter(k => cakes[k].remaining >= 0.05);
+        const cakeKey = availableKeys[Math.floor(Math.random() * availableKeys.length)];
+        const info = CAKES[cakeKey];
+
+        let amount;
+        do {
+            amount = ORDER_AMOUNTS[Math.floor(Math.random() * ORDER_AMOUNTS.length)];
+        } while (amount / info.price > cakes[cakeKey].remaining + 0.01);
+
+        const requiredWeight = amount / info.price;
+
+        currentCustomer = {
+            id: customerCount + 1,
+            cakeKey,
+            amount,
+            requiredWeight,
+            spawnTime: Date.now()
+        };
+
+        customerStartTime = Date.now();
+        showCustomerUI();
+        selectCake(cakeKey);
+    }
+
+    function showCustomerUI() {
+        const c = currentCustomer;
+        const info = CAKES[c.cakeKey];
+
+        document.getElementById('waiting-msg').style.display = 'none';
+
+        let card = document.getElementById('customer-area').querySelector('.customer-card');
+        if (!card) {
+            card = document.createElement('div');
+            card.className = 'customer-card';
+            document.getElementById('customer-area').appendChild(card);
+        }
+
+        card.innerHTML = `
+            <div>👤 顾客 #${c.id}</div>
+            <div class="order">
+                我要买 <strong style="color:${info.color}">${info.name}蛋糕</strong>，
+                <strong>${c.amount}元</strong> 的
+            </div>
+            <div class="hint">（约需 ${c.requiredWeight.toFixed(2)} 斤，您不能称重，请凭经验切割）</div>
+        `;
+
+        document.getElementById('cut-area').style.display = 'block';
+        document.getElementById('game-feedback').className = 'feedback info';
+        document.getElementById('game-feedback').textContent = '拖动鼠标在蛋糕上画出要切下的扇形区域';
+    }
+
+    function selectCake(key) {
+        if (!cakes[key] || cakes[key].remaining < 0.05) return;
+        selectedCakeKey = key;
+
+        const canvas = document.getElementById('game-cut-canvas');
+        gameCutHandler = createSliceHandler(canvas, () => ({
+            cakeKey: key,
+            remaining: cakes[key].remaining,
+            total: cakes[key].total
+        }));
+        gameCutHandler.reset();
+
+        renderCakePanel();
+    }
+
+    function confirmGameCut() {
+        if (!currentCustomer || !selectedCakeKey || !gameCutHandler) return;
+
+        const angle = gameCutHandler.getSliceAngle();
+        if (angle < 0.05) {
+            document.getElementById('game-feedback').className = 'feedback error';
+            document.getElementById('game-feedback').textContent = '请先拖动鼠标画出要切的区域';
+            return;
+        }
+
+        const cake = cakes[selectedCakeKey];
+        const remainingAngle = (cake.remaining / cake.total) * 2 * Math.PI;
+        const actualWeight = weightFromAngle(angle, cake.remaining, remainingAngle);
+        const requiredWeight = currentCustomer.requiredWeight;
+        const error = actualWeight - requiredWeight;
+        const responseTime = (Date.now() - customerStartTime) / 1000;
+
+        cake.remaining = Math.max(0, cake.remaining - actualWeight);
+
+        const price = CAKES[selectedCakeKey].price;
+        const orderAmountYuan = currentCustomer.amount;
+        const result = calcItemEarnings(actualWeight, requiredWeight, orderAmountYuan, price);
+        totalMoney += result.earned;
+        customerCount++;
+
+        gameData.push({
+            customerId: currentCustomer.id,
+            cakeKey: selectedCakeKey,
+            cakeName: CAKES[selectedCakeKey].name,
+            orderAmount: currentCustomer.amount,
+            requiredWeight: Math.round(requiredWeight * 100) / 100,
+            actualWeight: Math.round(actualWeight * 100) / 100,
+            error: Math.round(error * 100) / 100,
+            earned: result.earned,
+            penalized: result.penalized,
+            responseTime: Math.round(responseTime * 10) / 10,
+            cakeRemainingAfter: Math.round(cake.remaining * 100) / 100,
+            timestamp: Date.now() - gameStartTime
+        });
+
+        updateStats();
+
+        const errorMsg = error >= 0 ? `多了 ${error.toFixed(2)} 斤` : `少了 ${Math.abs(error).toFixed(2)} 斤`;
+        const fb = document.getElementById('game-feedback');
+        if (result.penalized) {
+            fb.className = 'feedback penalty';
+            fb.textContent =
+                `⚠️ 已切 ${actualWeight.toFixed(2)} 斤（需要 ${requiredWeight.toFixed(2)} 斤，${errorMsg}），误差超过一半！扣除本次订单金额 ${orderAmountYuan} 元`;
+        } else {
+            fb.className = 'feedback success';
+            fb.textContent =
+                `已切 ${actualWeight.toFixed(2)} 斤（需要 ${requiredWeight.toFixed(2)} 斤，${errorMsg}），收入 +${result.earned.toFixed(2)} 元`;
+        }
+
+        currentCustomer = null;
+        selectedCakeKey = null;
+        renderCakePanel();
+
+        document.getElementById('customer-area').querySelector('.customer-card')?.remove();
+        document.getElementById('waiting-msg').style.display = 'block';
+        document.getElementById('waiting-msg').textContent = '等待下一位顾客...';
+        document.getElementById('cut-area').style.display = 'none';
+
+        setTimeout(() => {
+            if (gamePhase === 'active') scheduleNextCustomer();
+        }, 1500);
+    }
+
+    function endGame() {
+        if (gamePhase === 'ended') return;
+        gamePhase = 'ended';
+
+        clearInterval(timerInterval);
+        clearTimeout(customerTimeout);
+
+        showResults();
+    }
+
+    function showResults() {
+        showScreen('screen-results');
+
+        const totalTime = (Date.now() - gameStartTime) / 1000;
+        const avgError = gameData.length > 0
+            ? gameData.reduce((s, d) => s + Math.abs(d.error), 0) / gameData.length
+            : 0;
+
+        const penaltyCount = gameData.filter(d => d.penalized).length;
+
+        document.getElementById('results-summary').innerHTML = `
+            <p>被试编号：<strong>${subjectId}</strong></p>
+            <p>实验时长：${Math.floor(totalTime / 60)}分${Math.floor(totalTime % 60)}秒</p>
+            <p>服务顾客：<strong>${customerCount}</strong> 位</p>
+            <p>被扣款次数：<strong style="color:#ef5350;">${penaltyCount}</strong> 次</p>
+            <p>总收入：<strong style="color:#ffd700;">${totalMoney.toFixed(2)}</strong> 元</p>
+            <p>平均切割误差：<strong>${avgError.toFixed(2)}</strong> 斤</p>
+        `;
+
+        const tbody = document.getElementById('results-tbody');
+        tbody.innerHTML = '';
+        gameData.forEach((d, i) => {
+            const tr = document.createElement('tr');
+            tr.innerHTML = `
+                <td>${i + 1}</td>
+                <td><span class="color-dot" style="background:${CAKES[d.cakeKey].color}"></span>${d.cakeName}</td>
+                <td>${d.orderAmount}</td>
+                <td>${d.requiredWeight}</td>
+                <td>${d.actualWeight}</td>
+                <td>${d.error >= 0 ? '+' : ''}${d.error}</td>
+                <td>${d.earned}</td>
+                <td>${d.penalized ? '是 (-' + d.orderAmount + ')' : '否'}</td>
+                <td>${d.responseTime}</td>
+            `;
+            tbody.appendChild(tr);
+        });
+    }
+
+    function downloadData() {
+        const exportObj = {
+            subjectId,
+            experimentName: '蛋糕分配者游戏',
+            gameDurationMinutes: 10,
+            totalMoney: Math.round(totalMoney * 100) / 100,
+            customerCount,
+            practiceData,
+            gameData,
+            finalCakes: Object.fromEntries(
+                Object.keys(cakes).map(k => [k, Math.round(cakes[k].remaining * 100) / 100])
+            ),
+            exportTime: new Date().toISOString()
+        };
+
+        const blob = new Blob([JSON.stringify(exportObj, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `cake_allocator_${subjectId}_${Date.now()}.json`;
+        a.click();
+        URL.revokeObjectURL(url);
+    }
+
+    // --- Event bindings ---
+    document.getElementById('btn-start-intro').addEventListener('click', () => {
+        const id = document.getElementById('subject-id').value.trim();
+        if (!id) { alert('请输入被试编号'); return; }
+        subjectId = id;
+        showScreen('screen-instructions');
+    });
+
+    document.getElementById('btn-start-practice').addEventListener('click', () => {
+        showScreen('screen-practice');
+        initPractice();
+    });
+
+    document.getElementById('btn-practice-reset').addEventListener('click', () => {
+        if (practiceHandler) practiceHandler.reset();
+    });
+
+    document.getElementById('btn-practice-cut').addEventListener('click', confirmPracticeCut);
+
+    document.getElementById('btn-game-reset').addEventListener('click', () => {
+        if (gameCutHandler) gameCutHandler.reset();
+    });
+
+    document.getElementById('btn-game-cut').addEventListener('click', confirmGameCut);
+
+    document.getElementById('btn-download').addEventListener('click', downloadData);
+
+})();
+</script>
+</body>
+</html>
