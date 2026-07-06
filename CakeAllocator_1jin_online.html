@@ -231,6 +231,7 @@
         .feedback.success { background: rgba(76,175,80,0.3); }
         .feedback.error { background: rgba(244,67,54,0.3); }
         .feedback.info { background: rgba(33,150,243,0.3); }
+        .feedback.penalty { background: rgba(183,28,28,0.45); border: 1px solid #ef5350; }
 
         .waiting-msg {
             text-align: center;
@@ -320,6 +321,7 @@
                 <li>实验限时 <strong>10 分钟</strong>，您不知道共有多少位顾客。</li>
                 <li>卖出越多，收入越高。时间结束后剩余蛋糕无法再售卖。</li>
                 <li>若蛋糕提前卖完，将不再有顾客，直到时间结束。</li>
+                <li style="color:#ef5350;"><strong>惩罚规则：</strong>若切下的蛋糕与所需分量相差超过一半（例如需要 1 斤却切了不足 0.5 斤或超过 1.5 斤），将<strong>扣除该品类本次订单的金额</strong>。</li>
             </ul>
             <p style="margin-top:16px; color:#ffd700;">首先进入<strong>练习阶段</strong>，学习切出一斤（500克）蛋糕的大小。</p>
         </div>
@@ -389,6 +391,7 @@
                     <th>实际(斤)</th>
                     <th>误差(斤)</th>
                     <th>收入(元)</th>
+                    <th>扣款</th>
                     <th>用时(s)</th>
                 </tr>
             </thead>
@@ -513,6 +516,25 @@
     function weightFromAngle(angleRad, remainingWeight, remainingAngleRad) {
         if (remainingAngleRad <= 0) return 0;
         return (angleRad / remainingAngleRad) * remainingWeight;
+    }
+
+    function isExcessiveError(actualWeight, requiredWeight) {
+        return Math.abs(actualWeight - requiredWeight) > requiredWeight * 0.5;
+    }
+
+    function calcItemEarnings(actualWeight, requiredWeight, orderAmountYuan) {
+        if (isExcessiveError(actualWeight, requiredWeight)) {
+            return {
+                penalized: true,
+                earned: -orderAmountYuan,
+                orderAmount: orderAmountYuan
+            };
+        }
+        return {
+            penalized: false,
+            earned: Math.round(actualWeight * (orderAmountYuan / requiredWeight) * 100) / 100,
+            orderAmount: orderAmountYuan
+        };
     }
 
     function createSliceHandler(canvas, getCakeState) {
@@ -893,17 +915,27 @@
         cake.remaining = Math.max(0, cake.remaining - actualWeight);
 
         const price = CAKES[selectedCakeKey].price;
-        const earned = actualWeight * price;
+        const orderAmountYuan = ORDER_WEIGHT * price;
+        const result = calcItemEarnings(actualWeight, ORDER_WEIGHT, orderAmountYuan);
 
         item.completed = true;
         item.actualWeight = Math.round(actualWeight * 100) / 100;
         item.error = Math.round(error * 100) / 100;
-        item.earned = Math.round(earned * 100) / 100;
+        item.earned = result.earned;
+        item.penalized = result.penalized;
+        item.orderAmount = result.orderAmount;
 
         const errorMsg = error >= 0 ? `多了 ${error.toFixed(2)} 斤` : `少了 ${Math.abs(error).toFixed(2)} 斤`;
-        document.getElementById('game-feedback').className = 'feedback success';
-        document.getElementById('game-feedback').textContent =
-            `${CAKES[selectedCakeKey].name}蛋糕：切了 ${actualWeight.toFixed(2)} 斤（目标 1.00 斤，${errorMsg}），+${earned.toFixed(2)} 元`;
+        const fb = document.getElementById('game-feedback');
+        if (result.penalized) {
+            fb.className = 'feedback penalty';
+            fb.textContent =
+                `⚠️ ${CAKES[selectedCakeKey].name}蛋糕：切了 ${actualWeight.toFixed(2)} 斤（目标 1.00 斤，${errorMsg}），误差超过一半！扣除该品类订单金额 ${orderAmountYuan} 元`;
+        } else {
+            fb.className = 'feedback success';
+            fb.textContent =
+                `${CAKES[selectedCakeKey].name}蛋糕：切了 ${actualWeight.toFixed(2)} 斤（目标 1.00 斤，${errorMsg}），+${result.earned.toFixed(2)} 元`;
+        }
 
         selectedCakeKey = null;
         renderCakePanel();
@@ -933,6 +965,8 @@
                 actualWeight: item.actualWeight,
                 error: item.error,
                 earned: item.earned,
+                penalized: item.penalized,
+                orderAmount: item.orderAmount,
                 responseTime: Math.round(responseTime * 10) / 10,
                 cakeRemainingAfter: Math.round(cakes[item.cakeKey].remaining * 100) / 100,
                 timestamp: Date.now() - gameStartTime
@@ -943,9 +977,15 @@
         customerCount++;
         updateStats();
 
-        document.getElementById('game-feedback').className = 'feedback success';
-        document.getElementById('game-feedback').textContent =
-            `顾客 #${c.id} 订单完成！共 ${c.items.length} 种蛋糕，收入 +${orderTotal.toFixed(2)} 元`;
+        const penalizedCount = c.items.filter(i => i.penalized).length;
+        const fb = document.getElementById('game-feedback');
+        if (orderTotal >= 0) {
+            fb.className = 'feedback success';
+            fb.textContent = `顾客 #${c.id} 订单完成！共 ${c.items.length} 种蛋糕，本单合计 +${orderTotal.toFixed(2)} 元`;
+        } else {
+            fb.className = 'feedback penalty';
+            fb.textContent = `顾客 #${c.id} 订单完成！共 ${c.items.length} 种蛋糕（${penalizedCount} 项被扣款），本单合计 ${orderTotal.toFixed(2)} 元`;
+        }
 
         currentCustomer = null;
         selectedCakeKey = null;
@@ -976,6 +1016,7 @@
         const avgError = gameData.length > 0
             ? gameData.reduce((s, d) => s + Math.abs(d.error), 0) / gameData.length
             : 0;
+        const penaltyCount = gameData.filter(d => d.penalized).length;
 
         document.getElementById('results-summary').innerHTML = `
             <p>被试编号：<strong>${subjectId}</strong></p>
@@ -983,6 +1024,7 @@
             <p>实验时长：${Math.floor(totalTime / 60)}分${Math.floor(totalTime % 60)}秒</p>
             <p>服务顾客：<strong>${customerCount}</strong> 位</p>
             <p>总切割次数：<strong>${gameData.length}</strong> 次</p>
+            <p>被扣款次数：<strong style="color:#ef5350;">${penaltyCount}</strong> 次</p>
             <p>总收入：<strong style="color:#ffd700;">${totalMoney.toFixed(2)}</strong> 元</p>
             <p>平均切割误差：<strong>${avgError.toFixed(2)}</strong> 斤</p>
         `;
@@ -998,6 +1040,7 @@
                 <td>${d.actualWeight}</td>
                 <td>${d.error >= 0 ? '+' : ''}${d.error}</td>
                 <td>${d.earned}</td>
+                <td>${d.penalized ? '是 (-' + d.orderAmount + ')' : '否'}</td>
                 <td>${d.responseTime}</td>
             `;
             tbody.appendChild(tr);
